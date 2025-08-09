@@ -16,7 +16,6 @@ grpc_opizontas/
     ├── models.rs         # 定义核心业务数据结构 (例如 Post 结构体)
     ├── utils/
     │   ├── mod.rs        # 声明工具模块
-    │   └── error.rs      # (示例) 定义项目统一的错误类型
     └── services/
         ├── mod.rs        # 声明服务模块
         ├── post_service.rs     # 实现 PostService gRPC 服务

@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package registry;
+
+// 服务发现服务，由网关提供
+service RegistryService {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+}
+
+message RegisterRequest {
+  // Bot 的网络地址, 例如 "http://bot-a:50051"
+  string address = 1;
+  // Bot 提供的 gRPC 服务名称列表
+  repeated string services = 2;
+}
+
+message RegisterResponse {
+  // 注册是否成功
+  bool success = 1;
+  // 可选的返回消息
+  string message = 2;
+}
