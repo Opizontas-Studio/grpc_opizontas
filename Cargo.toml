@@ -1,6 +1,6 @@
 [package]
 name = "grpc_opizontas"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 
 [dependencies]
@@ -11,7 +11,7 @@ tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
 futures = "0.3"
 http = "1.0"
 http-body = "1.0"
-tower = { version = "0.4", features = ["util"] }
+tower = { version = "0.5.2", features = ["util"] }
 http-body-util = "0.1"
 bytes = "1.0"
 
