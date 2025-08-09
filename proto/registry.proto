@@ -8,10 +8,12 @@ service RegistryService {
 }
 
 message RegisterRequest {
+  // API 密钥，用于身份验证
+  string api_key = 1;
   // Bot 的网络地址, 例如 "http://bot-a:50051"
-  string address = 1;
+  string address = 2;
   // Bot 提供的 gRPC 服务名称列表
-  repeated string services = 2;
+  repeated string services = 3;
 }
 
 message RegisterResponse {

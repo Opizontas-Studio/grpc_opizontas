@@ -1,6 +1,7 @@
 pub mod registry {
     tonic::include_proto!("registry");
 }
+pub mod config;
 pub mod server;
 pub mod services;
 

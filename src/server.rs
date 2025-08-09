@@ -1,3 +1,4 @@
+use crate::config::Config;
 use crate::registry::registry_service_server::RegistryServiceServer;
 use crate::services::registry_service::MyRegistryService;
 use crate::services::router_service::DynamicRouter;
@@ -6,8 +7,12 @@ use tonic::transport::Server;
 pub async fn start() -> Result<(), Box<dyn std::error::Error>> {
     let addr = "0.0.0.0:50051".parse()?;
 
+    // 加载配置
+    let config = Config::load()?;
+    println!("Security configuration loaded successfully");
+
     // 创建服务实例
-    let registry_service = MyRegistryService::default();
+    let registry_service = MyRegistryService::new(config);
     let registry = registry_service.registry.clone();
 
     println!("Gateway server listening on {} with registry service", addr);

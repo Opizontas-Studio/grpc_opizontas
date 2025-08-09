@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use tonic::{Request, Response, Status};
 
+use crate::config::Config;
 use crate::registry::{
     registry_service_server::RegistryService, RegisterRequest, RegisterResponse,
 };
@@ -29,12 +30,14 @@ pub type ServiceRegistry = Arc<Mutex<HashMap<String, ServiceInfo>>>;
 #[derive(Debug)]
 pub struct MyRegistryService {
     pub registry: ServiceRegistry,
+    pub config: Config,
 }
 
-impl Default for MyRegistryService {
-    fn default() -> Self {
+impl MyRegistryService {
+    pub fn new(config: Config) -> Self {
         let service = Self {
             registry: Arc::new(Mutex::new(HashMap::new())),
+            config,
         };
 
         // 启动定期清理任务
@@ -43,7 +46,7 @@ impl Default for MyRegistryService {
             let mut interval = tokio::time::interval(Duration::from_secs(30));
             loop {
                 interval.tick().await;
-                println!("🔍 执行服务过期检查...");
+                println!("执行服务过期检查...");
                 Self::cleanup_expired_services(&registry_clone).await;
             }
         });
@@ -63,11 +66,11 @@ impl MyRegistryService {
         for (service_name, service_info) in registry_map.iter() {
             if let Ok(elapsed) = now.duration_since(service_info.last_heartbeat) {
                 if elapsed > timeout {
-                    println!("❌ Service '{}' expired after {}s, removing from registry", 
+                    println!("Service '{}' expired after {}s, removing from registry", 
                            service_name, elapsed.as_secs());
                     to_remove.push(service_name.clone());
                 } else {
-                    println!("✅ Service '{}' is healthy (last heartbeat {}s ago)", 
+                    println!("Service '{}' is healthy (last heartbeat {}s ago)", 
                            service_name, elapsed.as_secs());
                 }
             }
@@ -131,6 +134,12 @@ impl RegistryService for MyRegistryService {
         request: Request<RegisterRequest>,
     ) -> Result<Response<RegisterResponse>, Status> {
         let req = request.into_inner();
+        
+        // 验证 Token
+        if !self.config.validate_token(&req.api_key) {
+            return Err(Status::unauthenticated("Invalid token"));
+        }
+
         let mut registry = self.registry.lock().unwrap();
 
         let service_info = ServiceInfo {

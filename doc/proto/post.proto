@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package post;
+
+// Service Definition
+service PostService {
+  // 根据 ID 获取单个帖子的详细信息
+  rpc GetPost (GetPostRequest) returns (Post);
+
+  // 根据查询条件获取帖子列表
+  rpc QueryPosts (QueryPostsRequest) returns (QueryPostsResponse);
+}
+
+// Message Definitions
+message Post {
+  string id = 1;         // 帖子的唯一 ID
+  string author_id = 2;  // 作者的 Discord 用户 ID
+  string channel_id = 3; // 帖子所在的频道 ID
+  string title = 4;      // 帖子标题
+  string content = 5;    // 帖子内容 (Markdown 或纯文本)
+  int64 created_at = 6;  // 创建时间戳 (Unix timestamp)
+  repeated string tags = 7; // 标签，用于分类和搜索
+  int32 reaction_count = 8; // 帖子的总反应数
+  int32 reply_count = 9;    // 帖子的回复消息数
+  string image_url = 10;  // 帖子封面图片的 URL
+}
+
+message GetPostRequest {
+  string id = 1; // 要获取的帖子的 ID
+  optional string channel_id = 2; // (可选) 帖子所在的频道 ID，用于校验和路由
+}
+
+message QueryPostsRequest {
+  optional string author_id = 1;  // 按作者查询
+  optional string channel_id = 2; // 按频道查询
+  repeated string tags = 3;       // 按标签查询 (查询包含所有指定标签的帖子)
+  int32 page_size = 4;            // 分页大小
+  int32 page_number = 5;          // 页码
+}
+
+message QueryPostsResponse {
+  repeated Post posts = 1; // 查询到的帖子列表
+  int32 total_count = 2;   // 符合条件的总帖子数
+}

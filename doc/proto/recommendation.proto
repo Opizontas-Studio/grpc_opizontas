@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package recommendation;
+
+import "google/protobuf/empty.proto";
+
+// Service Definition
+service RecommendationService {
+  // 根据 ID 获取一个安利小纸条
+  rpc GetRecommendation (GetRecommendationRequest) returns (RecommendationSlip);
+
+  // 删除一个小纸条
+  rpc DeleteRecommendation (DeleteRecommendationRequest) returns (google.protobuf.Empty);
+
+  // 屏蔽或取消屏蔽一个小纸条
+  rpc BlockRecommendation (BlockRecommendationRequest) returns (RecommendationSlip);
+}
+
+// Message Definitions
+message RecommendationSlip {
+  string id = 1;         // 安利小纸条的唯一 ID
+  string author_id = 2;  // 作者的 Discord 用户 ID
+  string author_nickname = 3; // 作者当时的昵称
+  string content = 4;    // 安利内容
+  string post_url = 5;   // 指向相关帖子的 URL
+  int32 upvotes = 6;     // 获得的“点赞”数
+  int32 questions = 7;   // 获得的“疑问”数
+  int32 downvotes = 8;   // 获得的“点踩”数
+  int64 created_at = 9;  // 创建时间戳 (Unix timestamp)
+  string reviewer_id = 10; // 审定该小纸条的管理员 ID
+  bool is_blocked = 11;  // 标记该小纸条是否已被屏蔽
+}
+
+message GetRecommendationRequest {
+  string id = 1;
+}
+
+message DeleteRecommendationRequest {
+  string id = 1;
+}
+
+message BlockRecommendationRequest {
+  string id = 1;
+  bool block = 2; // true 为屏蔽, false 为取消屏蔽
+}
