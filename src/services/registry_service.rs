@@ -43,7 +43,7 @@ impl MyRegistryService {
         // 启动定期清理任务
         let registry_clone = service.registry.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            let mut interval = tokio::time::interval(Duration::from_secs(120));
             loop {
                 interval.tick().await;
                 println!("执行服务过期检查...");
@@ -60,7 +60,7 @@ impl MyRegistryService {
     async fn cleanup_expired_services(registry: &ServiceRegistry) {
         let mut registry_map = registry.lock().unwrap();
         let now = SystemTime::now();
-        let timeout = Duration::from_secs(60); // 60秒超时
+        let timeout = Duration::from_secs(300); // 60秒超时
 
         let mut to_remove = Vec::new();
         for (service_name, service_info) in registry_map.iter() {
