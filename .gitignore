@@ -20,3 +20,8 @@ Thumbs.db
 
 # example 
 examples/
+
+# env
+.env
+config.toml
+config copy.toml

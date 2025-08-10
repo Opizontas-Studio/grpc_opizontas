@@ -42,12 +42,13 @@ impl MyRegistryService {
 
         // 启动定期清理任务
         let registry_clone = service.registry.clone();
+        let heartbeat_timeout = service.config.heartbeat_timeout();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(120));
+            let mut interval = tokio::time::interval(heartbeat_timeout);
             loop {
                 interval.tick().await;
                 println!("执行服务过期检查...");
-                Self::cleanup_expired_services(&registry_clone).await;
+                Self::cleanup_expired_services(&registry_clone, heartbeat_timeout).await;
             }
         });
 
@@ -57,10 +58,15 @@ impl MyRegistryService {
 
 impl MyRegistryService {
     // 清理过期的服务
-    async fn cleanup_expired_services(registry: &ServiceRegistry) {
-        let mut registry_map = registry.lock().unwrap();
+    async fn cleanup_expired_services(registry: &ServiceRegistry, timeout: Duration) {
+        let mut registry_map = match registry.lock() {
+            Ok(map) => map,
+            Err(e) => {
+                println!("Failed to acquire registry lock for cleanup: {}", e);
+                return;
+            }
+        };
         let now = SystemTime::now();
-        let timeout = Duration::from_secs(300); // 60秒超时
 
         let mut to_remove = Vec::new();
         for (service_name, service_info) in registry_map.iter() {

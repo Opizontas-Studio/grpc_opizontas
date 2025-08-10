@@ -16,6 +16,10 @@ http-body-util = "0.1"
 bytes = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.9.5"
+dashmap = "6.0"
+tokio-util = { version = "0.7", features = ["rt"] }
+envy = "0.4"
+dotenvy = "0.15"
 
 [build-dependencies]
 tonic-prost-build = "0.14.1"

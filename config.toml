@@ -1,9 +1,0 @@
-[security]
-# Token 池 - 预生成的有效令牌列表
-tokens = [
-    "token_abc123def456",
-    "token_xyz789uvw012", 
-    "token_mno345pqr678",
-    "token_stu901vwx234",
-    "token_hij567klm890"
-]
