@@ -11,8 +11,7 @@ use uuid::Uuid;
 use crate::config::Config;
 use crate::registry::{
     RegisterRequest, RegisterResponse, registry_service_server::RegistryService,
-    ConnectionMessage, connection_message::MessageType, ConnectionRegister,
-    ForwardResponse, Heartbeat, ConnectionStatus, connection_status::StatusType,
+    ConnectionMessage, connection_message::MessageType, ConnectionStatus, connection_status::StatusType,
 };
 use super::reverse_connection_manager::ReverseConnectionManager;
 
