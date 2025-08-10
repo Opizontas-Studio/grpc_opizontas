@@ -64,7 +64,7 @@ pub struct GrpcClientManager {
     pub clients: ClientPool,
     pub config: ConnectionPoolConfig,
     pub stats: Arc<DashMap<String, u64>>, // 连接统计
-    task_tracker: TaskTracker,
+    task_tracker: Arc<TaskTracker>,
 }
 
 impl Default for GrpcClientManager {
@@ -79,7 +79,7 @@ impl GrpcClientManager {
             clients: Arc::new(DashMap::new()),
             config: config.clone(),
             stats: Arc::new(DashMap::new()),
-            task_tracker: TaskTracker::new(),
+            task_tracker: Arc::new(TaskTracker::new()),
         };
 
         // 启动清理任务
@@ -225,7 +225,7 @@ impl Clone for GrpcClientManager {
             clients: self.clients.clone(),
             config: self.config.clone(),
             stats: self.stats.clone(),
-            task_tracker: TaskTracker::new(), // 每个克隆都有自己的任务跟踪器
+            task_tracker: self.task_tracker.clone(), // 共享同一个任务跟踪器
         }
     }
 }

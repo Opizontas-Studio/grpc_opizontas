@@ -61,7 +61,8 @@ where
 
     fn call(&mut self, req: http::Request<B>) -> Self::Future {
         let registry = self.registry.clone();
-        let router = self.clone();
+        let client_manager = self.client_manager.clone();
+        let config = self.config.clone();
 
         Box::pin(async move {
             let path = req.uri().path();
@@ -92,8 +93,8 @@ where
                 Some(addr) => {
                     // 转发请求到目标服务
                     match forwarder::forward_request(
-                        &router.client_manager,
-                        &router.config,
+                        &client_manager,
+                        &config,
                         req,
                         &addr,
                     )
