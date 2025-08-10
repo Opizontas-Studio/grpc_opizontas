@@ -12,7 +12,9 @@ prost = "0.14.1"
 
 # 异步运行时
 tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+tokio-stream = "0.1"
 futures = "0.3"
+uuid = { version = "1.0", features = ["v4"] }
 
 # HTTP 相关
 http = "1.0"

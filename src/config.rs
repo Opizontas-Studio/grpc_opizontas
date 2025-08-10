@@ -7,6 +7,7 @@ pub struct Config {
     pub security: SecurityConfig,
     pub router: RouterConfig,
     pub connection_pool: ConnectionPoolConfig,
+    pub reverse_connection: ReverseConnectionConfig,
     pub server: ServerConfig,
 }
 
@@ -24,6 +25,14 @@ pub struct ConnectionPoolConfig {
     pub connection_ttl: u64,
     pub idle_timeout: u64,
     pub cleanup_interval: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReverseConnectionConfig {
+    pub heartbeat_timeout: u64,
+    pub request_timeout: u64,
+    pub cleanup_interval: u64,
+    pub max_pending_requests: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +67,14 @@ struct EnvConfig {
     grpc_pool_idle_timeout: Option<u64>,
     #[serde(default)]
     grpc_pool_cleanup_interval: Option<u64>,
+    #[serde(default)]
+    grpc_reverse_heartbeat_timeout: Option<u64>,
+    #[serde(default)]
+    grpc_reverse_request_timeout: Option<u64>,
+    #[serde(default)]
+    grpc_reverse_cleanup_interval: Option<u64>,
+    #[serde(default)]
+    grpc_reverse_max_pending_requests: Option<usize>,
     #[serde(default)]
     grpc_server_address: Option<String>,
     #[serde(default)]
@@ -124,6 +141,20 @@ impl Config {
             self.connection_pool.cleanup_interval = val;
         }
 
+        // 反向连接配置覆盖
+        if let Some(val) = env_config.grpc_reverse_heartbeat_timeout {
+            self.reverse_connection.heartbeat_timeout = val;
+        }
+        if let Some(val) = env_config.grpc_reverse_request_timeout {
+            self.reverse_connection.request_timeout = val;
+        }
+        if let Some(val) = env_config.grpc_reverse_cleanup_interval {
+            self.reverse_connection.cleanup_interval = val;
+        }
+        if let Some(val) = env_config.grpc_reverse_max_pending_requests {
+            self.reverse_connection.max_pending_requests = val;
+        }
+
         // 服务器配置覆盖
         if let Some(val) = env_config.grpc_server_address {
             self.server.address = val;
@@ -166,6 +197,12 @@ impl Default for Config {
                 connection_ttl: 300,
                 idle_timeout: 60,
                 cleanup_interval: 30,
+            },
+            reverse_connection: ReverseConnectionConfig {
+                heartbeat_timeout: 120,
+                request_timeout: 30,
+                cleanup_interval: 60,
+                max_pending_requests: 1000,
             },
             server: ServerConfig {
                 address: "0.0.0.0:50051".to_string(),

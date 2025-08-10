@@ -14,9 +14,10 @@ pub async fn start() -> Result<(), Box<dyn std::error::Error>> {
     // 创建服务实例
     let registry_service = MyRegistryService::new(config.clone());
     let registry = registry_service.registry.clone();
+    let reverse_manager = registry_service.reverse_connection_manager.clone();
 
     // 创建动态路由器
-    let router = DynamicRouter::new(registry.clone(), config.clone());
+    let router = DynamicRouter::new(registry.clone(), config.clone(), reverse_manager);
 
     tracing::info!("Gateway server listening on {} with registry service", addr);
     tracing::info!("Dynamic routing enabled for all gRPC requests");
