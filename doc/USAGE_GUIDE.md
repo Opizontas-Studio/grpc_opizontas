@@ -9,34 +9,14 @@
 ```bash
 cargo run
 ```
-
-您应该看到类似输出：
+您应该看到类似输出，具体取决于您的日志级别配置：
 
 ```
-Starting gateway server...
-Gateway server listening on 0.0.0.0:50051 with registry service
-Dynamic routing will be integrated via custom router middleware
+INFO grpc_opizontas: Starting gateway server...
+INFO grpc_opizontas::server: Security configuration loaded successfully
+INFO grpc_opizontas::server: Gateway server listening on 0.0.0.0:50051 with registry service
+INFO grpc_opizontas::server: Dynamic routing enabled for all gRPC requests
 ```
-
-### 2. 运行演示客户端
-
-在另一个终端中运行演示程序：
-
-```bash
-cargo run --bin usage_demo
-```
-
-这将演示如何：
-- 注册多个服务到网关
-- 模拟服务心跳更新
-- 观察服务注册表的行为
-
-### 3. 运行简单测试
-
-或者运行简单的测试客户端：
-
-```bash
-cargo run --bin test_registry
 ```
 
 ## 实际使用场景
@@ -51,11 +31,12 @@ use tonic::Request;
 // 在您的微服务代码中
 let mut client = RegistryServiceClient::connect("http://gateway:50051").await?;
 
+// 重新注册服务
 let request = Request::new(RegisterRequest {
+    api_key: "your-secret-token".to_string(), // 每次心跳都需要提供
     address: "http://my-service:50052".to_string(),
     services: vec!["MyService".to_string()],
 });
-
 let response = client.register(request).await?;
 ```
 
@@ -70,6 +51,7 @@ loop {
     
     // 重新注册服务
     let request = Request::new(RegisterRequest {
+        api_key: "your-secret-token".to_string(), // 必须提供有效的 API Key
         address: "http://my-service:50052".to_string(),
         services: vec!["MyService".to_string()],
     });
@@ -91,99 +73,87 @@ grpcurl -plaintext localhost:50051 package.MyService/GetData
 
 ## 配置选项
 
-### 服务器配置
+项目采用分层配置系统，**您不应该直接修改源代码来更改配置**。
 
-在 `src/server.rs` 中修改：
+配置优先级从低到高为：**默认值 -> `config.toml` -> 环境变量**。
 
-```rust
-let addr = "0.0.0.0:50051".parse()?; // 修改监听地址
+### 1. 使用 `config.toml` 文件
+
+在项目根目录创建或修改 `config.toml` 文件来覆盖默认值。这是一个完整的配置示例：
+
+```toml
+# config.toml
+
+[server]
+address = "0.0.0.0:50051"
+log_level = "info"
+
+[security]
+# 在这里设置的 Token 会被环境变量覆盖
+tokens = ["default-token-from-file"]
+
+[router]
+heartbeat_timeout = 120  # 服务心跳超时时间 (秒)
+request_timeout = 30     # 转发请求的超时时间 (秒)
+retry_attempts = 3
+max_concurrent_requests = 1000
+
+[connection_pool]
+max_connections = 100    # 连接池最大连接数
+connection_ttl = 300     # 连接最大生命周期 (秒)
+idle_timeout = 60        # 连接最大空闲时间 (秒)
+cleanup_interval = 30    # 连接池清理任务的运行间隔 (秒)
 ```
 
-### 服务超时配置
+### 2. 使用环境变量 (推荐用于生产环境)
 
-在 `src/services/registry_service.rs` 中修改：
+您可以通过设置环境变量来覆盖所有其他配置。这对于部署和管理密钥尤其有用。
 
-```rust
-let timeout = Duration::from_secs(60); // 修改服务超时时间
-```
-
-### 清理间隔配置
-
-```rust
-let mut interval = tokio::time::interval(Duration::from_secs(30)); // 修改清理间隔
-```
+*   `GRPC_SERVER_ADDRESS`: "0.0.0.0:8080"
+*   `GRPC_LOG_LEVEL`: "debug"
+*   `GRPC_SECURITY_TOKENS`: "secret-token-1,secret-token-2" (多个 Token 用逗号分隔)
+*   `GRPC_ROUTER_HEARTBEAT_TIMEOUT`: 60
+*   `GRPC_ROUTER_REQUEST_TIMEOUT`: 15
+*   `GRPC_POOL_MAX_CONNECTIONS`: 200
 
 ## 监控和调试
 
 ### 查看服务注册日志
 
-网关会输出详细的服务注册和清理日志：
+通过 `tracing` 框架，网关会输出详细的结构化日志：
 
 ```
-Registering service 'UserService' at address 'http://user-service:50052'
-Service 'OldService' expired after 65s, removing from registry
+INFO grpc_opizontas::services::registry_service: Registering service {service_name="PostService" address="http://post-service:50051"}
+WARN grpc_opizontas::services::registry_service: Service expired, removing from registry {service_name="OldService" elapsed_secs=121}
 ```
 
-### 服务状态检查
+### 调试技巧
 
-您可以通过修改 `registry_service.rs` 添加查询接口：
-
-```rust
-// 添加到 proto 文件和服务实现中
-rpc ListServices(Empty) returns (ServiceListResponse);
-```
-
-## 扩展功能
-
-### 添加健康检查
-
-修改 `client_manager.rs` 添加主动健康检查：
-
-```rust
-pub async fn health_check(&self, address: &str) -> bool {
-    // 实现健康检查逻辑
-}
-```
-
-### 添加负载均衡
-
-如果同一服务有多个实例，可以在 `router_service.rs` 中添加负载均衡逻辑。
-
-### 添加指标监控
-
-集成 Prometheus 指标：
-
-```toml
-# 在 Cargo.toml 中添加
-prometheus = "0.13"
-```
+1.  **启用详细日志**: 设置 `RUST_LOG=debug` 或在 `config.toml` 中设置 `log_level = "debug"` 来查看详细的路由和连接池信息。
+2.  **使用 `grpcurl`**: 这是测试 gRPC 服务的强大工具，可以用来直接调用注册服务或通过网关调用后端服务。
+3.  **检查服务器控制台输出**: 关注 `WARN` 和 `ERROR` 级别的日志，它们通常能直接指出问题所在。
 
 ## 故障排除
 
 ### 常见问题
 
-1. **连接被拒绝**
-   - 确保网关服务器正在运行
-   - 检查端口是否被占用
+1.  **连接被拒绝**:
+    *   确保网关服务器正在运行。
+    *   检查 `config.toml` 或 `GRPC_SERVER_ADDRESS` 环境变量中的地址和端口是否正确。
 
-2. **服务注册失败**
-   - 检查网络连通性
-   - 确认 protobuf 定义一致
+2.  **服务注册失败 (Unauthenticated)**:
+    *   **检查 `api_key`**: 确保客户端请求中的 `api_key` 与服务器配置 (`security.tokens` 或 `GRPC_SECURITY_TOKENS`) 中的某个 Token 一致。这是最常见的注册失败原因。
+    *   检查网络连通性。
 
-3. **服务被意外清理**
-   - 增加心跳频率
-   - 调整超时时间
-
-### 调试技巧
-
-1. 启用详细日志
-2. 使用 `grpcurl` 测试连接
-3. 检查服务器控制台输出
+3.  **服务被意外清理**:
+    *   客户端发送心跳（重新注册）的频率是否低于 `router.heartbeat_timeout` 的值。
+    *   考虑适当增加 `heartbeat_timeout` 的值。
 
 ## 下一步
 
-1. 实现完整的动态路由集成
-2. 添加服务健康检查
-3. 实现负载均衡策略
-4. 添加监控和指标
-5. 支持服务版本管理
+项目已经实现了一个健壮的基础版本，未来的方向可以包括：
+
+1.  **实现负载均衡策略**: 当一个服务有多个实例时，在 `services/router/forwarder.rs` 中实现轮询、最少连接或基于延迟的负载均衡。
+2.  **完善指标监控**: 使用 `tokio-metrics` 或集成 `Prometheus`，暴露更详细的指标，如请求延迟、连接池状态、活动连接数等。
+3.  **服务版本管理**: 允许服务注册时提供版本号，并支持按版本进行路由。
+4.  **分布式配置**: 集成 `etcd` 或 `Consul` 作为配置中心和更强大的服务发现后端。

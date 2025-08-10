@@ -5,7 +5,6 @@ pub enum RouterError {
     ServiceUnavailable(String),
     InvalidPath(String),
     ForwardingError(String),
-    LockError(String),
 }
 
 impl std::fmt::Display for RouterError {
@@ -15,7 +14,6 @@ impl std::fmt::Display for RouterError {
             RouterError::ServiceUnavailable(msg) => write!(f, "Service unavailable: {msg}"),
             RouterError::InvalidPath(msg) => write!(f, "Invalid path: {msg}"),
             RouterError::ForwardingError(msg) => write!(f, "Forwarding error: {msg}"),
-            RouterError::LockError(msg) => write!(f, "Lock error: {msg}"),
         }
     }
 }

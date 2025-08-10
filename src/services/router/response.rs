@@ -15,7 +15,6 @@ pub fn create_error_response(
         RouterError::ServiceUnavailable(msg) => ("14", msg.as_str()), // UNAVAILABLE
         RouterError::InvalidPath(msg) => ("3", msg.as_str()),     // INVALID_ARGUMENT
         RouterError::ForwardingError(msg) => ("14", msg.as_str()), // UNAVAILABLE
-        RouterError::LockError(msg) => ("2", msg.as_str()),       // UNKNOWN
     };
 
     tracing::error!(status = ?grpc_status, message = %message, "Creating error response");

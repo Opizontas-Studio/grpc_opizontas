@@ -75,19 +75,11 @@ where
                 }
             };
 
-            // 从注册表查找目标地址（改进的锁处理）
-            let target_addr = match registry.lock() {
-                Ok(registry_map) => registry_map
-                    .get(&service_name)
-                    .filter(|info| info.health_status == ServiceHealthStatus::Healthy)
-                    .map(|info| info.address.clone()),
-                Err(e) => {
-                    let error =
-                        RouterError::LockError(format!("Failed to acquire registry lock: {e}"));
-                    tracing::error!(%error, "Failed to acquire registry lock");
-                    return Ok(response::create_error_response(&error));
-                }
-            };
+            // 从注册表查找目标地址（使用 DashMap）
+            let target_addr = registry
+                .get(&service_name)
+                .filter(|entry| entry.value().health_status == ServiceHealthStatus::Healthy)
+                .map(|entry| entry.value().address.clone());
             tracing::debug!(
                 service_name = %service_name,
                 path = %path,
