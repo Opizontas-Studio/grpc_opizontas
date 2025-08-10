@@ -7,7 +7,6 @@ use http_body::Body;
 use http_body_util::BodyExt;
 use std::task::{Context, Poll};
 use tower::{Service, util::ServiceExt};
-use http_body_util::combinators::BoxBody;
 use tonic::server::NamedService;
 use std::time::Duration;
 
@@ -96,22 +95,18 @@ impl DynamicRouter {
         &self,
         req: http::Request<B>,
         target_addr: &str,
-    ) -> Result<http::Response<BoxBody<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>>, RouterError>
+    ) -> Result<http::Response<http_body_util::combinators::UnsyncBoxBody<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>>, RouterError>
     where
-        B: Body + Send + 'static,
-        B::Data: Send,
+        B: Body<Data = bytes::Bytes> + Send + 'static,
         B::Error: Into<Box<dyn std::error::Error + Send + Sync>> + std::fmt::Debug,
     {
         // 获取或创建客户端连接
         let channel = self.client_manager.get_or_create_client(target_addr).await
             .map_err(|e| RouterError::ForwardingError(format!("Failed to get client: {}", e)))?;
         
-        // 收集请求体
+        // 直接构建新的请求，不收集请求体
         let (parts, body) = req.into_parts();
-        let body_bytes = body.collect().await
-            .map_err(|e| RouterError::ForwardingError(format!("Failed to collect request body: {:?}", e)))?
-            .to_bytes();
-
+        
         // 构建新的请求
         let mut new_req = http::Request::builder()
             .method(parts.method)
@@ -123,9 +118,8 @@ impl DynamicRouter {
             new_req = new_req.header(name, value);
         }
 
-        let new_req = new_req.body(tonic::body::Body::new(
-            http_body_util::Full::new(body_bytes)
-        )).map_err(|e| RouterError::ForwardingError(format!("Failed to build request: {}", e)))?;
+        let new_req = new_req.body(tonic::body::Body::new(body))
+            .map_err(|e| RouterError::ForwardingError(format!("Failed to build request: {}", e)))?;
 
         // 发送请求到目标服务（带超时）
         let response = tokio::time::timeout(
@@ -135,11 +129,8 @@ impl DynamicRouter {
             .map_err(|_| RouterError::ForwardingError("Request timeout".to_string()))?
             .map_err(|e| RouterError::ForwardingError(format!("Failed to forward request: {}", e)))?;
 
-        // 转换响应体
+        // 直接转换响应体，不收集响应体
         let (parts, body) = response.into_parts();
-        let body_bytes = body.collect().await
-            .map_err(|e| RouterError::ForwardingError(format!("Failed to collect response body: {:?}", e)))?
-            .to_bytes();
 
         let mut response_builder = http::Response::builder()
             .status(parts.status)
@@ -150,9 +141,10 @@ impl DynamicRouter {
             response_builder = response_builder.header(name, value);
         }
 
-        let boxed_body = http_body_util::Full::new(body_bytes)
-            .map_err(|never| -> Box<dyn std::error::Error + Send + Sync> { match never {} })
-            .boxed();
+        // 使用 UnsyncBoxBody 来避免 Sync 约束
+        let boxed_body = http_body_util::combinators::UnsyncBoxBody::new(
+            body.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
+        );
 
         response_builder.body(boxed_body)
             .map_err(|e| RouterError::ForwardingError(format!("Failed to build response: {}", e)))
@@ -161,7 +153,7 @@ impl DynamicRouter {
     // 创建错误响应
     fn create_error_response(
         error: &RouterError,
-    ) -> http::Response<BoxBody<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>> {
+    ) -> http::Response<http_body_util::combinators::UnsyncBoxBody<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>> {
         let (grpc_status, message) = match error {
             RouterError::ServiceNotFound(msg) => ("5", msg.as_str()), // NOT_FOUND
             RouterError::ServiceUnavailable(msg) => ("14", msg.as_str()), // UNAVAILABLE
@@ -179,9 +171,10 @@ impl DynamicRouter {
             .header("grpc-message", message)
             .header("content-type", "application/grpc")
             .body(
-                http_body_util::Empty::new()
-                    .map_err(|never| -> Box<dyn std::error::Error + Send + Sync> { match never {} })
-                    .boxed(),
+                http_body_util::combinators::UnsyncBoxBody::new(
+                    http_body_util::Empty::new()
+                        .map_err(|never| -> Box<dyn std::error::Error + Send + Sync> { match never {} })
+                ),
             ) {
             Ok(response) => response,
             Err(e) => {
@@ -190,9 +183,10 @@ impl DynamicRouter {
                 http::Response::builder()
                     .status(500)
                     .body(
-                        http_body_util::Empty::new()
-                            .map_err(|never| -> Box<dyn std::error::Error + Send + Sync> { match never {} })
-                            .boxed(),
+                        http_body_util::combinators::UnsyncBoxBody::new(
+                            http_body_util::Empty::new()
+                                .map_err(|never| -> Box<dyn std::error::Error + Send + Sync> { match never {} })
+                        ),
                     )
                     .unwrap_or_default()
             }
@@ -202,11 +196,10 @@ impl DynamicRouter {
 
 impl<B> Service<http::Request<B>> for DynamicRouter
 where
-    B: Body + Send + 'static,
-    B::Data: Send,
+    B: Body<Data = bytes::Bytes> + Send + 'static,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>> + std::fmt::Debug,
 {
-    type Response = http::Response<BoxBody<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>>;
+    type Response = http::Response<http_body_util::combinators::UnsyncBoxBody<bytes::Bytes, Box<dyn std::error::Error + Send + Sync>>>;
     type Error = std::convert::Infallible;
     type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
