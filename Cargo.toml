@@ -3,23 +3,38 @@ name = "grpc_opizontas"
 version = "0.0.1"
 edition = "2024"
 
+# 主要依赖
 [dependencies]
+# gRPC/Tonic 相关
 tonic = "0.14.1"
 tonic-prost = "0.14.1"
 prost = "0.14.1"
+
+# 异步运行时
 tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
 futures = "0.3"
+
+# HTTP 相关
 http = "1.0"
 http-body = "1.0"
-tower = { version = "0.5.2", features = ["util"] }
 http-body-util = "0.1"
 bytes = "1.0"
+
+# 工具库
+tower = { version = "0.5.2", features = ["util"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+dashmap = "6.0"
+
+# 配置/序列化
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.9.5"
-dashmap = "6.0"
-tokio-util = { version = "0.7", features = ["rt"] }
 envy = "0.4"
 dotenvy = "0.15"
 
+# 日志/追踪
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 构建依赖
 [build-dependencies]
-tonic-prost-build = "0.14.1"
+tonic-prost-build = "0.14.1"  # 注意：这里可能有拼写错误，应该是 tonic-prost-build

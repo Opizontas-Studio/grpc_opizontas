@@ -68,25 +68,25 @@ impl Config {
     pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
         // 加载 .env 文件（如果存在）
         let _ = dotenvy::dotenv();
-        
+
         // 从文件加载基础配置
         let mut config = Self::load_from_file().unwrap_or_else(|_| Self::default());
-        
+
         // 应用环境变量覆盖
         config.apply_env_overrides()?;
-        
+
         Ok(config)
     }
-    
+
     fn load_from_file() -> Result<Self, Box<dyn std::error::Error>> {
         let config_str = fs::read_to_string("config.toml")?;
         let config: Config = toml::from_str(&config_str)?;
         Ok(config)
     }
-    
+
     fn apply_env_overrides(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let env_config: EnvConfig = envy::from_env()?;
-        
+
         // 安全配置覆盖
         if let Some(tokens_str) = env_config.grpc_security_tokens {
             self.security.tokens = tokens_str
@@ -95,7 +95,7 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .collect();
         }
-        
+
         // 路由配置覆盖
         if let Some(val) = env_config.grpc_router_heartbeat_timeout {
             self.router.heartbeat_timeout = val;
@@ -109,7 +109,7 @@ impl Config {
         if let Some(val) = env_config.grpc_router_max_concurrent_requests {
             self.router.max_concurrent_requests = val;
         }
-        
+
         // 连接池配置覆盖
         if let Some(val) = env_config.grpc_pool_max_connections {
             self.connection_pool.max_connections = val;
@@ -123,7 +123,7 @@ impl Config {
         if let Some(val) = env_config.grpc_pool_cleanup_interval {
             self.connection_pool.cleanup_interval = val;
         }
-        
+
         // 服务器配置覆盖
         if let Some(val) = env_config.grpc_server_address {
             self.server.address = val;
@@ -131,19 +131,19 @@ impl Config {
         if let Some(val) = env_config.grpc_log_level {
             self.server.log_level = val;
         }
-        
+
         Ok(())
     }
-    
+
     pub fn validate_token(&self, token: &str) -> bool {
         self.security.tokens.contains(&token.to_string())
     }
-    
+
     // 获取路由配置的便利方法
     pub fn heartbeat_timeout(&self) -> Duration {
         Duration::from_secs(self.router.heartbeat_timeout)
     }
-    
+
     pub fn request_timeout(&self) -> Duration {
         Duration::from_secs(self.router.request_timeout)
     }

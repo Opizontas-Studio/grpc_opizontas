@@ -1,9 +1,9 @@
-use std::time::{Duration, Instant};
-use std::sync::Arc;
 use dashmap::DashMap;
-use tonic::transport::{Channel, Endpoint, Uri};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::time::interval;
 use tokio_util::task::TaskTracker;
+use tonic::transport::{Channel, Endpoint, Uri};
 
 // 连接池配置
 #[derive(Debug, Clone)]
@@ -81,18 +81,21 @@ impl GrpcClientManager {
             stats: Arc::new(DashMap::new()),
             task_tracker: TaskTracker::new(),
         };
-        
+
         // 启动清理任务
         manager.start_cleanup_task();
-        
+
         manager
     }
 
-    pub async fn get_or_create_client(&self, address: &str) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn get_or_create_client(
+        &self,
+        address: &str,
+    ) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
         // 先检查是否超过最大连接数
         if self.clients.len() >= self.config.max_connections {
             self.cleanup_expired_connections().await;
-            
+
             // 如果仍然超过限制，移除最老的连接
             if self.clients.len() >= self.config.max_connections {
                 self.evict_oldest_connection().await;
@@ -113,11 +116,13 @@ impl GrpcClientManager {
         }
 
         self.increment_stat("cache_misses");
-        
+
         // 创建新的客户端连接
-        let uri: Uri = address.parse().map_err(|e| format!("Invalid URI {}: {}", address, e))?;
+        let uri: Uri = address
+            .parse()
+            .map_err(|e| format!("Invalid URI {}: {}", address, e))?;
         let endpoint = Endpoint::from(uri);
-        
+
         let channel = endpoint
             .connect()
             .await
@@ -128,14 +133,14 @@ impl GrpcClientManager {
         self.clients.insert(address.to_string(), metadata);
         self.increment_stat("connections_created");
 
-        println!("Created new gRPC client connection to: {} (total: {})", address, self.clients.len());
+        tracing::info!(address = %address, total_clients = self.clients.len(), "Created new gRPC client connection");
         Ok(channel)
     }
 
     pub async fn remove_client(&self, address: &str) {
         if self.clients.remove(address).is_some() {
             self.increment_stat("connections_removed");
-            println!("Removed gRPC client connection to: {}", address);
+            tracing::info!(address = %address, "Removed gRPC client connection");
         }
     }
 
@@ -143,30 +148,36 @@ impl GrpcClientManager {
         let count = self.clients.len();
         self.clients.clear();
         self.stats.clear();
-        println!("Cleared {} gRPC client connections", count);
+        tracing::info!(cleared_count = count, "Cleared gRPC client connections");
     }
 
     pub fn get_stats(&self) -> std::collections::HashMap<String, u64> {
-        self.stats.iter().map(|entry| (entry.key().clone(), *entry.value())).collect()
+        self.stats
+            .iter()
+            .map(|entry| (entry.key().clone(), *entry.value()))
+            .collect()
     }
 
     fn increment_stat(&self, key: &str) {
-        self.stats.entry(key.to_string()).and_modify(|v| *v += 1).or_insert(1);
+        self.stats
+            .entry(key.to_string())
+            .and_modify(|v| *v += 1)
+            .or_insert(1);
     }
 
     async fn cleanup_expired_connections(&self) {
         let mut expired_keys = Vec::new();
-        
+
         for entry in self.clients.iter() {
             if entry.value().is_expired(&self.config) {
                 expired_keys.push(entry.key().clone());
             }
         }
-        
+
         for key in expired_keys {
             if self.clients.remove(&key).is_some() {
                 self.increment_stat("connections_expired");
-                println!("Expired connection removed: {}", key);
+                tracing::debug!(expired_connection = %key, "Expired connection removed");
             }
         }
     }
@@ -174,18 +185,18 @@ impl GrpcClientManager {
     async fn evict_oldest_connection(&self) {
         let mut oldest_key: Option<String> = None;
         let mut oldest_time = Instant::now();
-        
+
         for entry in self.clients.iter() {
             if entry.value().created_at < oldest_time {
                 oldest_time = entry.value().created_at;
                 oldest_key = Some(entry.key().clone());
             }
         }
-        
+
         if let Some(key) = oldest_key {
             if self.clients.remove(&key).is_some() {
                 self.increment_stat("connections_evicted");
-                println!("Evicted oldest connection: {}", key);
+                tracing::debug!(evicted_connection = %key, "Evicted oldest connection");
             }
         }
     }
@@ -194,31 +205,35 @@ impl GrpcClientManager {
         let clients = self.clients.clone();
         let config = self.config.clone();
         let stats = self.stats.clone();
-        
+
         self.task_tracker.spawn(async move {
             let mut cleanup_interval = interval(config.cleanup_interval);
             cleanup_interval.tick().await; // 跳过第一个tick
-            
+
             loop {
                 cleanup_interval.tick().await;
-                
+
                 let mut expired_keys = Vec::new();
                 for entry in clients.iter() {
                     if entry.value().is_expired(&config) {
                         expired_keys.push(entry.key().clone());
                     }
                 }
-                
+
                 let expired_count = expired_keys.len();
                 for key in expired_keys {
                     clients.remove(&key);
                 }
-                
+
                 if expired_count > 0 {
-                    stats.entry("connections_expired".to_string())
+                    stats
+                        .entry("connections_expired".to_string())
                         .and_modify(|v| *v += expired_count as u64)
                         .or_insert(expired_count as u64);
-                    println!("Cleanup task removed {} expired connections", expired_count);
+                    tracing::debug!(
+                        removed_count = expired_count,
+                        "Cleanup task removed expired connections"
+                    );
                 }
             }
         });

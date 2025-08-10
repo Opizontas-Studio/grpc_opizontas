@@ -5,7 +5,7 @@ use tonic::{Request, Response, Status};
 
 use crate::config::Config;
 use crate::registry::{
-    registry_service_server::RegistryService, RegisterRequest, RegisterResponse,
+    RegisterRequest, RegisterResponse, registry_service_server::RegistryService,
 };
 
 // 服务注册信息
@@ -47,7 +47,7 @@ impl MyRegistryService {
             let mut interval = tokio::time::interval(heartbeat_timeout);
             loop {
                 interval.tick().await;
-                println!("执行服务过期检查...");
+                tracing::debug!("Executing service expiration check...");
                 Self::cleanup_expired_services(&registry_clone, heartbeat_timeout).await;
             }
         });
@@ -62,7 +62,7 @@ impl MyRegistryService {
         let mut registry_map = match registry.lock() {
             Ok(map) => map,
             Err(e) => {
-                println!("Failed to acquire registry lock for cleanup: {}", e);
+                tracing::error!("Failed to acquire registry lock for cleanup: {}", e);
                 return;
             }
         };
@@ -72,19 +72,20 @@ impl MyRegistryService {
         for (service_name, service_info) in registry_map.iter() {
             if let Ok(elapsed) = now.duration_since(service_info.last_heartbeat) {
                 if elapsed > timeout {
-                    println!("Service '{}' expired after {}s, removing from registry", 
-                           service_name, elapsed.as_secs());
+                    tracing::warn!(service_name = %service_name, elapsed_secs = elapsed.as_secs(), "Service expired, removing from registry");
                     to_remove.push(service_name.clone());
                 } else {
-                    println!("Service '{}' is healthy (last heartbeat {}s ago)", 
-                           service_name, elapsed.as_secs());
+                    tracing::debug!(service_name = %service_name, last_heartbeat_secs = elapsed.as_secs(), "Service is healthy");
                 }
             }
         }
 
         if to_remove.is_empty() {
         } else {
-            println!("清理检查完成: 发现{}个过期服务，正在清理...", to_remove.len());
+            tracing::info!(
+                expired_count = to_remove.len(),
+                "Cleanup check completed, removing expired services..."
+            );
         }
 
         for service_name in to_remove {
@@ -112,9 +113,9 @@ impl MyRegistryService {
     pub fn update_service_health(&self, service_name: &str, status: ServiceHealthStatus) -> bool {
         let mut registry = self.registry.lock().unwrap();
         if let Some(service_info) = registry.get_mut(service_name) {
-            println!("Updated health status for service '{}': {:?}", service_name, status);
+            tracing::info!(service_name = %service_name, new_status = ?status, "Updated health status for service");
             service_info.health_status = status;
-            true
+            return true;
         } else {
             false
         }
@@ -124,7 +125,7 @@ impl MyRegistryService {
     pub fn unregister_service(&self, service_name: &str) -> bool {
         let mut registry = self.registry.lock().unwrap();
         if registry.remove(service_name).is_some() {
-            println!("Unregistered service: {}", service_name);
+            tracing::info!(service_name = %service_name, "Unregistered service");
             true
         } else {
             false
@@ -140,7 +141,7 @@ impl RegistryService for MyRegistryService {
         request: Request<RegisterRequest>,
     ) -> Result<Response<RegisterResponse>, Status> {
         let req = request.into_inner();
-        
+
         // 验证 Token
         if !self.config.validate_token(&req.api_key) {
             return Err(Status::unauthenticated("Invalid token"));
@@ -155,9 +156,10 @@ impl RegistryService for MyRegistryService {
         };
 
         for service_name in req.services {
-            println!(
-                "Registering service '{}' at address '{}'",
-                &service_name, &req.address
+            tracing::info!(
+                service_name = %service_name,
+                address = %req.address,
+                "Registering service"
             );
             registry.insert(service_name, service_info.clone());
         }
