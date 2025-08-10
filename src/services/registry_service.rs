@@ -17,7 +17,7 @@ pub enum RegistryError {
 impl std::fmt::Display for RegistryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RegistryError::LockError(msg) => write!(f, "Registry lock error: {}", msg),
+            RegistryError::LockError(msg) => write!(f, "Registry lock error: {msg}"),
         }
     }
 }
@@ -29,7 +29,7 @@ impl From<RegistryError> for Status {
         match error {
             RegistryError::LockError(msg) => {
                 tracing::error!("Registry lock error: {}", msg);
-                Status::internal(format!("Internal service error: {}", msg))
+                Status::internal(format!("Internal service error: {msg}"))
             }
         }
     }
@@ -126,8 +126,7 @@ impl MyRegistryService {
             Ok(registry) => registry,
             Err(e) => {
                 let error_msg = format!(
-                    "Failed to acquire registry lock in get_healthy_services: {}",
-                    e
+                    "Failed to acquire registry lock in get_healthy_services: {e}"
                 );
                 tracing::error!("{}", error_msg);
                 return Err(RegistryError::LockError(error_msg));
@@ -149,7 +148,7 @@ impl MyRegistryService {
             Ok(registry) => registry,
             Err(e) => {
                 let error_msg =
-                    format!("Failed to acquire registry lock in get_service_info: {}", e);
+                    format!("Failed to acquire registry lock in get_service_info: {e}");
                 tracing::error!("{}", error_msg);
                 return Err(RegistryError::LockError(error_msg));
             }
@@ -167,8 +166,7 @@ impl MyRegistryService {
             Ok(registry) => registry,
             Err(e) => {
                 let error_msg = format!(
-                    "Failed to acquire registry lock in update_service_health: {}",
-                    e
+                    "Failed to acquire registry lock in update_service_health: {e}"
                 );
                 tracing::error!("{}", error_msg);
                 return Err(RegistryError::LockError(error_msg));
@@ -189,8 +187,7 @@ impl MyRegistryService {
             Ok(registry) => registry,
             Err(e) => {
                 let error_msg = format!(
-                    "Failed to acquire registry lock in unregister_service: {}",
-                    e
+                    "Failed to acquire registry lock in unregister_service: {e}"
                 );
                 tracing::error!("{}", error_msg);
                 return Err(RegistryError::LockError(error_msg));
@@ -222,11 +219,10 @@ impl RegistryService for MyRegistryService {
         let mut registry = match self.registry.lock() {
             Ok(registry) => registry,
             Err(e) => {
-                let error_msg = format!("Failed to acquire registry lock in register: {}", e);
+                let error_msg = format!("Failed to acquire registry lock in register: {e}");
                 tracing::error!("{}", error_msg);
                 return Err(Status::internal(format!(
-                    "Internal service error: {}",
-                    error_msg
+                    "Internal service error: {error_msg}"
                 )));
             }
         };

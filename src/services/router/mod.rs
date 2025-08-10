@@ -83,7 +83,7 @@ where
                     .map(|info| info.address.clone()),
                 Err(e) => {
                     let error =
-                        RouterError::LockError(format!("Failed to acquire registry lock: {}", e));
+                        RouterError::LockError(format!("Failed to acquire registry lock: {e}"));
                     tracing::error!(%error, "Failed to acquire registry lock");
                     return Ok(response::create_error_response(&error));
                 }
@@ -117,8 +117,7 @@ where
                 None => {
                     // 服务未注册
                     let error = RouterError::ServiceNotFound(format!(
-                        "Service '{}' not found in registry",
-                        service_name
+                        "Service '{service_name}' not found in registry"
                     ));
                     Ok(response::create_error_response(&error))
                 }

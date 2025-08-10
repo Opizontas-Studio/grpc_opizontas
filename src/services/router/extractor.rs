@@ -20,7 +20,7 @@ pub fn extract_service_name(path: &str) -> Result<String, RouterError> {
     // 支持多种服务名格式
     let service_name = if service_path.contains('.') {
         // 标准格式: "package.ServiceName" -> "ServiceName"
-        service_path.split('.').last().unwrap_or(service_path)
+        service_path.split('.').next_back().unwrap_or(service_path)
     } else {
         // 简单格式: "ServiceName"
         service_path

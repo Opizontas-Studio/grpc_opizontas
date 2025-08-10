@@ -115,13 +115,13 @@ impl GrpcClientManager {
         // 创建新的客户端连接
         let uri: Uri = address
             .parse()
-            .map_err(|e| format!("Invalid URI {}: {}", address, e))?;
+            .map_err(|e| format!("Invalid URI {address}: {e}"))?;
         let endpoint = Endpoint::from(uri);
 
         let channel = endpoint
             .connect()
             .await
-            .map_err(|e| format!("Failed to connect to {}: {}", address, e))?;
+            .map_err(|e| format!("Failed to connect to {address}: {e}"))?;
 
         // 将新连接加入缓存
         let metadata = ConnectionMetadata::new(channel.clone());
