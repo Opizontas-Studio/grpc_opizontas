@@ -8,6 +8,33 @@ use crate::registry::{
     RegisterRequest, RegisterResponse, registry_service_server::RegistryService,
 };
 
+// 服务注册表错误类型
+#[derive(Debug)]
+pub enum RegistryError {
+    LockError(String),
+}
+
+impl std::fmt::Display for RegistryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RegistryError::LockError(msg) => write!(f, "Registry lock error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for RegistryError {}
+
+impl From<RegistryError> for Status {
+    fn from(error: RegistryError) -> Self {
+        match error {
+            RegistryError::LockError(msg) => {
+                tracing::error!("Registry lock error: {}", msg);
+                Status::internal(format!("Internal service error: {}", msg))
+            }
+        }
+    }
+}
+
 // 服务注册信息
 #[derive(Debug, Clone)]
 pub struct ServiceInfo {
@@ -94,41 +121,86 @@ impl MyRegistryService {
     }
 
     // 获取所有健康的服务
-    pub fn get_healthy_services(&self) -> HashMap<String, String> {
-        let registry = self.registry.lock().unwrap();
-        registry
+    pub fn get_healthy_services(&self) -> Result<HashMap<String, String>, RegistryError> {
+        let registry = match self.registry.lock() {
+            Ok(registry) => registry,
+            Err(e) => {
+                let error_msg = format!(
+                    "Failed to acquire registry lock in get_healthy_services: {}",
+                    e
+                );
+                tracing::error!("{}", error_msg);
+                return Err(RegistryError::LockError(error_msg));
+            }
+        };
+        Ok(registry
             .iter()
             .filter(|(_, info)| info.health_status == ServiceHealthStatus::Healthy)
             .map(|(name, info)| (name.clone(), info.address.clone()))
-            .collect()
+            .collect())
     }
 
     // 获取服务信息
-    pub fn get_service_info(&self, service_name: &str) -> Option<ServiceInfo> {
-        let registry = self.registry.lock().unwrap();
-        registry.get(service_name).cloned()
+    pub fn get_service_info(
+        &self,
+        service_name: &str,
+    ) -> Result<Option<ServiceInfo>, RegistryError> {
+        let registry = match self.registry.lock() {
+            Ok(registry) => registry,
+            Err(e) => {
+                let error_msg =
+                    format!("Failed to acquire registry lock in get_service_info: {}", e);
+                tracing::error!("{}", error_msg);
+                return Err(RegistryError::LockError(error_msg));
+            }
+        };
+        Ok(registry.get(service_name).cloned())
     }
 
     // 手动更新服务健康状态
-    pub fn update_service_health(&self, service_name: &str, status: ServiceHealthStatus) -> bool {
-        let mut registry = self.registry.lock().unwrap();
+    pub fn update_service_health(
+        &self,
+        service_name: &str,
+        status: ServiceHealthStatus,
+    ) -> Result<bool, RegistryError> {
+        let mut registry = match self.registry.lock() {
+            Ok(registry) => registry,
+            Err(e) => {
+                let error_msg = format!(
+                    "Failed to acquire registry lock in update_service_health: {}",
+                    e
+                );
+                tracing::error!("{}", error_msg);
+                return Err(RegistryError::LockError(error_msg));
+            }
+        };
         if let Some(service_info) = registry.get_mut(service_name) {
             tracing::info!(service_name = %service_name, new_status = ?status, "Updated health status for service");
             service_info.health_status = status;
-            return true;
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
     }
 
     // 注销服务
-    pub fn unregister_service(&self, service_name: &str) -> bool {
-        let mut registry = self.registry.lock().unwrap();
+    pub fn unregister_service(&self, service_name: &str) -> Result<bool, RegistryError> {
+        let mut registry = match self.registry.lock() {
+            Ok(registry) => registry,
+            Err(e) => {
+                let error_msg = format!(
+                    "Failed to acquire registry lock in unregister_service: {}",
+                    e
+                );
+                tracing::error!("{}", error_msg);
+                return Err(RegistryError::LockError(error_msg));
+            }
+        };
         if registry.remove(service_name).is_some() {
             tracing::info!(service_name = %service_name, "Unregistered service");
-            true
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
     }
 }
@@ -147,7 +219,17 @@ impl RegistryService for MyRegistryService {
             return Err(Status::unauthenticated("Invalid token"));
         }
 
-        let mut registry = self.registry.lock().unwrap();
+        let mut registry = match self.registry.lock() {
+            Ok(registry) => registry,
+            Err(e) => {
+                let error_msg = format!("Failed to acquire registry lock in register: {}", e);
+                tracing::error!("{}", error_msg);
+                return Err(Status::internal(format!(
+                    "Internal service error: {}",
+                    error_msg
+                )));
+            }
+        };
 
         let service_info = ServiceInfo {
             address: req.address.clone(),

@@ -49,13 +49,10 @@ where
         .map_err(|e| RouterError::ForwardingError(format!("Failed to build request: {}", e)))?;
 
     // 发送请求到目标服务（带超时）
-    let response = tokio::time::timeout(
-        config.request_timeout(),
-        channel.clone().oneshot(new_req),
-    )
-    .await
-    .map_err(|_| RouterError::ForwardingError("Request timeout".to_string()))?
-    .map_err(|e| RouterError::ForwardingError(format!("Failed to forward request: {}", e)))?;
+    let response = tokio::time::timeout(config.request_timeout(), channel.clone().oneshot(new_req))
+        .await
+        .map_err(|_| RouterError::ForwardingError("Request timeout".to_string()))?
+        .map_err(|e| RouterError::ForwardingError(format!("Failed to forward request: {}", e)))?;
 
     // 直接转换响应体，不收集响应体
     let (parts, body) = response.into_parts();

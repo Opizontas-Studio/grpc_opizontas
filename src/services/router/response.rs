@@ -27,9 +27,8 @@ pub fn create_error_response(
         .header("grpc-message", message)
         .header("content-type", "application/grpc")
         .body(http_body_util::combinators::UnsyncBoxBody::new(
-            Empty::new().map_err(|never| -> Box<dyn std::error::Error + Send + Sync> {
-                match never {}
-            }),
+            Empty::new()
+                .map_err(|never| -> Box<dyn std::error::Error + Send + Sync> { match never {} }),
         )) {
         Ok(response) => response,
         Err(e) => {
@@ -38,9 +37,9 @@ pub fn create_error_response(
             http::Response::builder()
                 .status(500)
                 .body(http_body_util::combinators::UnsyncBoxBody::new(
-                    Empty::new().map_err(
-                        |never| -> Box<dyn std::error::Error + Send + Sync> { match never {} },
-                    ),
+                    Empty::new().map_err(|never| -> Box<dyn std::error::Error + Send + Sync> {
+                        match never {}
+                    }),
                 ))
                 .unwrap_or_default()
         }

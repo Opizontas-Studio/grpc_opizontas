@@ -99,7 +99,14 @@ where
             match target_addr {
                 Some(addr) => {
                     // 转发请求到目标服务
-                    match forwarder::forward_request(&router.client_manager, &router.config, req, &addr).await {
+                    match forwarder::forward_request(
+                        &router.client_manager,
+                        &router.config,
+                        req,
+                        &addr,
+                    )
+                    .await
+                    {
                         Ok(response) => Ok(response),
                         Err(e) => {
                             tracing::error!(error = %e, "Failed to forward request");

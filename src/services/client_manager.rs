@@ -92,14 +92,9 @@ impl GrpcClientManager {
         &self,
         address: &str,
     ) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
-        // 先检查是否超过最大连接数
+        // 如果达到最大连接数限制，移除最老的连接
         if self.clients.len() >= self.config.max_connections {
-            self.cleanup_expired_connections().await;
-
-            // 如果仍然超过限制，移除最老的连接
-            if self.clients.len() >= self.config.max_connections {
-                self.evict_oldest_connection().await;
-            }
+            self.evict_oldest_connection().await;
         }
 
         // 尝试从缓存获取并更新使用时间
@@ -163,23 +158,6 @@ impl GrpcClientManager {
             .entry(key.to_string())
             .and_modify(|v| *v += 1)
             .or_insert(1);
-    }
-
-    async fn cleanup_expired_connections(&self) {
-        let mut expired_keys = Vec::new();
-
-        for entry in self.clients.iter() {
-            if entry.value().is_expired(&self.config) {
-                expired_keys.push(entry.key().clone());
-            }
-        }
-
-        for key in expired_keys {
-            if self.clients.remove(&key).is_some() {
-                self.increment_stat("connections_expired");
-                tracing::debug!(expired_connection = %key, "Expired connection removed");
-            }
-        }
     }
 
     async fn evict_oldest_connection(&self) {
