@@ -34,6 +34,7 @@ dotenvy = "0.15"
 # 日志/追踪
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+jemallocator = "0.5.4"
 
 # 构建依赖
 [build-dependencies]

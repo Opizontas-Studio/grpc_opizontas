@@ -6,7 +6,9 @@ pub mod server;
 pub mod services;
 
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
-
+use jemallocator::Jemalloc;
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 初始化 tracing
