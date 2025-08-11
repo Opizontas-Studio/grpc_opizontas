@@ -20,21 +20,6 @@ pub struct ReverseConnection {
 }
 
 impl ReverseConnection {
-    pub fn new(
-        connection_id: String,
-        services: Vec<String>,
-        request_sender: mpsc::UnboundedSender<ConnectionMessage>,
-    ) -> Self {
-        let now = Instant::now();
-        Self {
-            connection_id,
-            services,
-            created_at: now,
-            last_heartbeat: now,
-            is_active: true,
-            request_sender,
-        }
-    }
 
     pub fn update_heartbeat(&mut self) {
         self.last_heartbeat = Instant::now();
@@ -115,8 +100,15 @@ impl ReverseConnectionManager {
         services: Vec<String>,
         request_sender: mpsc::UnboundedSender<ConnectionMessage>,
     ) -> Result<(), String> {
-        let connection =
-            ReverseConnection::new(connection_id.clone(), services.clone(), request_sender);
+        let now = Instant::now();
+        let connection = ReverseConnection {
+            connection_id: connection_id.clone(),
+            services: services.clone(),
+            created_at: now,
+            last_heartbeat: now,
+            is_active: true,
+            request_sender,
+        };
 
         // 按连接ID存储
         self.connections_by_id

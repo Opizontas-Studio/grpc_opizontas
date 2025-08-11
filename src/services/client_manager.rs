@@ -35,15 +35,6 @@ pub struct ConnectionMetadata {
 }
 
 impl ConnectionMetadata {
-    pub fn new(channel: Channel) -> Self {
-        let now = Instant::now();
-        Self {
-            channel,
-            created_at: now,
-            last_used: now,
-            use_count: 0,
-        }
-    }
 
     pub fn touch(&mut self) {
         self.last_used = Instant::now();
@@ -59,7 +50,7 @@ impl ConnectionMetadata {
 
 pub type ClientPool = Arc<DashMap<String, ConnectionMetadata>>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GrpcClientManager {
     pub clients: ClientPool,
     pub config: ConnectionPoolConfig,
@@ -124,7 +115,13 @@ impl GrpcClientManager {
             .map_err(|e| format!("Failed to connect to {address}: {e}"))?;
 
         // 将新连接加入缓存
-        let metadata = ConnectionMetadata::new(channel.clone());
+        let now = Instant::now();
+        let metadata = ConnectionMetadata {
+            channel: channel.clone(),
+            created_at: now,
+            last_used: now,
+            use_count: 0,
+        };
         self.clients.insert(address.to_string(), metadata);
         self.increment_stat("connections_created");
 
@@ -218,14 +215,3 @@ impl GrpcClientManager {
     }
 }
 
-// 实现 Clone trait 用于 DynamicRouter
-impl Clone for GrpcClientManager {
-    fn clone(&self) -> Self {
-        Self {
-            clients: self.clients.clone(),
-            config: self.config.clone(),
-            stats: self.stats.clone(),
-            task_tracker: self.task_tracker.clone(), // 共享同一个任务跟踪器
-        }
-    }
-}
