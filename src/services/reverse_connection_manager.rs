@@ -1,13 +1,11 @@
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
-use crate::registry::{
-    ConnectionMessage, ForwardRequest, ForwardResponse
-};
+use crate::registry::{ConnectionMessage, ForwardRequest, ForwardResponse};
 
 // 反向连接元数据
 #[derive(Debug, Clone)]
@@ -117,10 +115,12 @@ impl ReverseConnectionManager {
         services: Vec<String>,
         request_sender: mpsc::UnboundedSender<ConnectionMessage>,
     ) -> Result<(), String> {
-        let connection = ReverseConnection::new(connection_id.clone(), services.clone(), request_sender);
+        let connection =
+            ReverseConnection::new(connection_id.clone(), services.clone(), request_sender);
 
         // 按连接ID存储
-        self.connections_by_id.insert(connection_id.clone(), connection.clone());
+        self.connections_by_id
+            .insert(connection_id.clone(), connection.clone());
 
         // 按服务名存储
         for service in services {
@@ -129,7 +129,8 @@ impl ReverseConnectionManager {
                 connection_id = %connection_id,
                 "Registered reverse connection for service"
             );
-            self.connections_by_service.insert(service, connection.clone());
+            self.connections_by_service
+                .insert(service, connection.clone());
         }
 
         Ok(())
@@ -176,7 +177,7 @@ impl ReverseConnectionManager {
         // 获取连接
         let connection = self
             .get_connection_for_service(service_name)
-            .ok_or_else(|| format!("No reverse connection found for service: {}", service_name))?;
+            .ok_or_else(|| format!("No reverse connection found for service: {service_name}"))?;
 
         // 生成请求ID
         let request_id = Uuid::new_v4().to_string();
@@ -210,11 +211,13 @@ impl ReverseConnectionManager {
         };
 
         let message = ConnectionMessage {
-            message_type: Some(crate::registry::connection_message::MessageType::Request(forward_request)),
+            message_type: Some(crate::registry::connection_message::MessageType::Request(
+                forward_request,
+            )),
         };
 
         // 发送请求到微服务
-        if let Err(_) = connection.request_sender.send(message) {
+        if connection.request_sender.send(message).is_err() {
             // 移除等待中的请求
             let pending_requests = self.pending_requests.read().await;
             pending_requests.remove(&request_id);
@@ -243,7 +246,7 @@ impl ReverseConnectionManager {
     pub async fn handle_response(&self, response: ForwardResponse) {
         let pending_requests = self.pending_requests.read().await;
         if let Some((_id, pending)) = pending_requests.remove(&response.request_id) {
-            if let Err(_) = pending.response_sender.send(response) {
+            if pending.response_sender.send(response).is_err() {
                 tracing::warn!(request_id = %pending.request_id, "Failed to send response to waiting client");
             }
         } else {
@@ -281,7 +284,8 @@ impl ReverseConnectionManager {
                     &connections_by_service,
                     &connections_by_id,
                     heartbeat_timeout,
-                ).await;
+                )
+                .await;
                 Self::cleanup_expired_requests(&pending_requests, request_timeout).await;
             }
         });
@@ -308,7 +312,7 @@ impl ReverseConnectionManager {
         // 移除过期连接
         for (connection_id, services) in expired_connections {
             tracing::warn!(connection_id = %connection_id, "Removing expired reverse connection");
-            
+
             connections_by_id.remove(&connection_id);
             for service in services {
                 connections_by_service.remove(&service);

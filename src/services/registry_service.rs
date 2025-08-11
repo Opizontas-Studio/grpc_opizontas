@@ -3,17 +3,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 use uuid::Uuid;
 
+use super::reverse_connection_manager::ReverseConnectionManager;
 use crate::config::Config;
 use crate::registry::{
-    RegisterRequest, RegisterResponse, registry_service_server::RegistryService,
-    ConnectionMessage, connection_message::MessageType, ConnectionStatus, connection_status::StatusType,
+    ConnectionMessage, ConnectionStatus, RegisterRequest, RegisterResponse,
+    connection_message::MessageType, connection_status::StatusType,
+    registry_service_server::RegistryService,
 };
-use super::reverse_connection_manager::ReverseConnectionManager;
 
 // 服务注册信息
 #[derive(Debug, Clone)]
@@ -191,7 +192,7 @@ impl RegistryService for MyRegistryService {
     ) -> Result<Response<ReceiverStream<Result<ConnectionMessage, Status>>>, Status> {
         let mut inbound = request.into_inner();
         let (outbound_tx, outbound_rx) = mpsc::channel(100);
-        
+
         // 等待第一个消息，应该是连接注册
         let first_message = match inbound.next().await {
             Some(Ok(msg)) => msg,
@@ -238,7 +239,8 @@ impl RegistryService for MyRegistryService {
         let (request_tx, mut request_rx) = mpsc::unbounded_channel();
 
         // 注册反向连接
-        if let Err(e) = self.reverse_connection_manager
+        if let Err(e) = self
+            .reverse_connection_manager
             .register_connection(connection_id.clone(), services.clone(), request_tx)
             .await
         {
@@ -255,7 +257,7 @@ impl RegistryService for MyRegistryService {
             })),
         };
 
-        if let Err(_) = outbound_tx.send(Ok(status_msg)).await {
+        if (outbound_tx.send(Ok(status_msg)).await).is_err() {
             tracing::error!("Failed to send connection confirmation");
             return Err(Status::internal("Failed to send confirmation"));
         }
@@ -276,7 +278,9 @@ impl RegistryService for MyRegistryService {
                                 }
                                 MessageType::Heartbeat(heartbeat) => {
                                     // 更新心跳
-                                    reverse_manager.update_heartbeat(&heartbeat.connection_id).await;
+                                    reverse_manager
+                                        .update_heartbeat(&heartbeat.connection_id)
+                                        .await;
                                 }
                                 MessageType::Status(status) => {
                                     // 处理状态消息
@@ -302,7 +306,9 @@ impl RegistryService for MyRegistryService {
             }
 
             // 连接结束时清理
-            reverse_manager.unregister_connection(&connection_id_clone).await;
+            reverse_manager
+                .unregister_connection(&connection_id_clone)
+                .await;
             tracing::info!(connection_id = %connection_id_clone, "Reverse connection closed");
         });
 
@@ -310,7 +316,7 @@ impl RegistryService for MyRegistryService {
         let outbound_tx_clone = outbound_tx.clone();
         tokio::spawn(async move {
             while let Some(message) = request_rx.recv().await {
-                if let Err(_) = outbound_tx_clone.send(Ok(message)).await {
+                if (outbound_tx_clone.send(Ok(message)).await).is_err() {
                     tracing::error!("Failed to send message to client, connection may be closed");
                     break;
                 }

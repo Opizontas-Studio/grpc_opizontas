@@ -38,6 +38,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 jemallocator = "0.5.4"
 
+# 错误处理
+thiserror = "2.0.12"
+
 # 构建依赖
 [build-dependencies]
 tonic-prost-build = "0.14.1" 

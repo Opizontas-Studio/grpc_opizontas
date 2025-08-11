@@ -1,21 +1,14 @@
+use thiserror::Error;
+
 // 定义路由错误类型
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum RouterError {
+    #[error("Service not found: {0}")]
     ServiceNotFound(String),
+    #[error("Service unavailable: {0}")]
     ServiceUnavailable(String),
+    #[error("Invalid path: {0}")]
     InvalidPath(String),
+    #[error("Forwarding error: {0}")]
     ForwardingError(String),
 }
-
-impl std::fmt::Display for RouterError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RouterError::ServiceNotFound(msg) => write!(f, "Service not found: {msg}"),
-            RouterError::ServiceUnavailable(msg) => write!(f, "Service unavailable: {msg}"),
-            RouterError::InvalidPath(msg) => write!(f, "Invalid path: {msg}"),
-            RouterError::ForwardingError(msg) => write!(f, "Forwarding error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for RouterError {}

@@ -5,8 +5,8 @@ pub mod config;
 pub mod server;
 pub mod services;
 
-use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use jemallocator::Jemalloc;
+use tracing_subscriber::{EnvFilter, FmtSubscriber};
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 #[tokio::main]

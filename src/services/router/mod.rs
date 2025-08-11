@@ -29,9 +29,9 @@ pub struct DynamicRouter {
 
 impl DynamicRouter {
     pub fn new(
-        registry: ServiceRegistry, 
-        config: Config, 
-        reverse_manager: std::sync::Arc<ReverseConnectionManager>
+        registry: ServiceRegistry,
+        config: Config,
+        reverse_manager: std::sync::Arc<ReverseConnectionManager>,
     ) -> Self {
         // 使用配置创建连接管理器
         let connection_pool_config = crate::services::client_manager::ConnectionPoolConfig {
@@ -83,7 +83,7 @@ impl DynamicRouter {
         let body_bytes = match body.collect().await {
             Ok(collected) => collected.to_bytes().to_vec(),
             Err(e) => {
-                return Err(format!("Failed to collect request body: {:?}", e));
+                return Err(format!("Failed to collect request body: {e:?}"));
             }
         };
 
@@ -93,8 +93,8 @@ impl DynamicRouter {
             .await?;
 
         // 构建 HTTP 响应
-        let mut response_builder = http::Response::builder()
-            .status(forward_response.status_code as u16);
+        let mut response_builder =
+            http::Response::builder().status(forward_response.status_code as u16);
 
         // 添加响应头
         for (name, value) in forward_response.headers {
@@ -109,7 +109,7 @@ impl DynamicRouter {
 
         response_builder
             .body(response_body)
-            .map_err(|e| format!("Failed to build response: {}", e))
+            .map_err(|e| format!("Failed to build response: {e}"))
     }
 }
 
@@ -153,7 +153,7 @@ where
             if reverse_manager.has_reverse_connection(&service_name) {
                 // 使用反向连接转发请求
                 tracing::debug!(service_name = %service_name, "Using reverse connection for request");
-                
+
                 match Self::forward_via_reverse_connection(
                     &reverse_manager,
                     &service_name,
@@ -165,7 +165,9 @@ where
                     Ok(response) => Ok(response),
                     Err(e) => {
                         tracing::error!(error = %e, "Failed to forward via reverse connection");
-                        Ok(response::create_error_response(&RouterError::ForwardingError(e)))
+                        Ok(response::create_error_response(
+                            &RouterError::ForwardingError(e),
+                        ))
                     }
                 }
             } else {
@@ -185,13 +187,7 @@ where
                 match target_addr {
                     Some(addr) => {
                         // 转发请求到目标服务
-                        match forwarder::forward_request(
-                            &client_manager,
-                            &config,
-                            req,
-                            &addr,
-                        )
-                        .await
+                        match forwarder::forward_request(&client_manager, &config, req, &addr).await
                         {
                             Ok(response) => Ok(response),
                             Err(e) => {
