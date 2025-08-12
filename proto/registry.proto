@@ -63,6 +63,32 @@ message ForwardRequest {
   bytes payload = 4;
   // 超时时间 (秒)
   int32 timeout_seconds = 5;
+  
+  // 流式传输支持
+  StreamingInfo streaming_info = 6;
+}
+
+// 流式传输信息
+message StreamingInfo {
+  // 流式传输类型
+  enum StreamType {
+    // 一元调用（默认）
+    UNARY = 0;
+    // 客户端流
+    CLIENT_STREAMING = 1;
+    // 服务端流
+    SERVER_STREAMING = 2;
+    // 双向流
+    BIDIRECTIONAL_STREAMING = 3;
+  }
+  
+  StreamType stream_type = 1;
+  // 是否为流的结束标记
+  bool is_stream_end = 2;
+  // 流序列号（用于排序）
+  int64 sequence_number = 3;
+  // 流数据块大小（字节）
+  int32 chunk_size = 4;
 }
 
 // 转发响应消息
@@ -77,6 +103,9 @@ message ForwardResponse {
   bytes payload = 4;
   // 错误消息 (如果有)
   string error_message = 5;
+  
+  // 流式传输支持
+  StreamingInfo streaming_info = 6;
 }
 
 // 心跳消息

@@ -20,6 +20,7 @@ Thumbs.db
 
 # example 
 examples/
+test/
 
 # env
 .env

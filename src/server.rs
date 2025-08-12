@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::registry::registry_service_server::RegistryServiceServer;
-use crate::services::registry_service::MyRegistryService;
+use crate::services::registry::MyRegistryService;
 use crate::services::router::DynamicRouter;
 use tonic::transport::Server;
 
