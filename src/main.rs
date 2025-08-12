@@ -4,7 +4,6 @@ pub mod registry {
 pub mod config;
 pub mod server;
 pub mod services;
-pub mod gateway_client;
 
 use jemallocator::Jemalloc;
 use tracing_subscriber::{EnvFilter, FmtSubscriber};

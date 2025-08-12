@@ -136,36 +136,75 @@ impl GatewayClient {
         Err(GatewayClientError::Timeout)
     }
 
-    /// 客户端流调用（暂时未实现）
-    #[allow(dead_code)]
+    /// 客户端流调用
     pub async fn call_client_stream<T, R>(
         &mut self,
-        _service_name: &str, 
-        _method_path: &str,
-        _requests: impl Iterator<Item = T>,
+        service_name: &str, 
+        method_path: &str,
+        requests: impl Iterator<Item = T> + Send + 'static,
     ) -> Result<R, GatewayClientError>
     where
-        T: prost::Message,
+        T: prost::Message + Send + 'static,
         R: prost::Message + Default,
     {
-        // TODO: 实现客户端流逻辑
-        Err(GatewayClientError::Serialization("Client streaming not yet implemented".to_string()))
+        let (request_tx, request_rx) = mpsc::channel(100);
+        
+        // 发送所有请求
+        self.send_client_stream_requests(requests, request_tx, service_name, method_path);
+        
+        // 建立连接并等待响应
+        let request_stream = ReceiverStream::new(request_rx).map(|req| {
+            crate::registry::ConnectionMessage {
+                message_type: Some(crate::registry::connection_message::MessageType::Request(req)),
+            }
+        });
+
+        let response = self.client.establish_connection(request_stream).await?;
+        let mut inbound = response.into_inner();
+        
+        // 等待响应
+        while let Some(message_result) = inbound.next().await {
+            let message = message_result?;
+            
+            if let Some(crate::registry::connection_message::MessageType::Response(response)) = message.message_type {
+                return self.deserialize_response(response.payload);
+            }
+        }
+        
+        Err(GatewayClientError::Timeout)
     }
 
-    /// 服务端流调用（暂时未实现）  
-    #[allow(dead_code)]
+    /// 服务端流调用
     pub async fn call_server_stream<T, R>(
         &mut self,
-        _service_name: &str,
-        _method_path: &str, 
-        _request: T,
-    ) -> Result<(), GatewayClientError>
+        service_name: &str,
+        method_path: &str, 
+        request: T,
+    ) -> Result<impl Stream<Item = Result<R, GatewayClientError>>, GatewayClientError>
     where
-        T: prost::Message,
-        R: prost::Message + Default,
+        T: prost::Message + Send + 'static,
+        R: prost::Message + Default + Send + 'static,
     {
-        // TODO: 实现服务端流逻辑
-        Err(GatewayClientError::Serialization("Server streaming not yet implemented".to_string()))
+        let (response_tx, response_rx) = mpsc::channel(100);
+        let (request_tx, request_rx) = mpsc::channel(1);
+        
+        // 发送单个请求
+        self.send_server_stream_request(request, request_tx, service_name, method_path);
+        
+        // 建立连接并处理响应流
+        let request_stream = ReceiverStream::new(request_rx).map(|req| {
+            crate::registry::ConnectionMessage {
+                message_type: Some(crate::registry::connection_message::MessageType::Request(req)),
+            }
+        });
+
+        let response = self.client.establish_connection(request_stream).await?;
+        let inbound = response.into_inner();
+        
+        // 启动响应流处理任务
+        self.spawn_server_stream_handler::<R>(inbound, response_tx);
+        
+        Ok(ReceiverStream::new(response_rx))
     }
 
     /// 双向流调用
@@ -320,6 +359,151 @@ impl GatewayClient {
                         let _ = response_tx.send(Err(GatewayClientError::Grpc(e))).await;
                         break;
                     }
+                }
+            }
+        });
+    }
+
+    /// 发送客户端流请求
+    fn send_client_stream_requests<T>(
+        &self,
+        requests: impl Iterator<Item = T> + Send + 'static,
+        request_tx: mpsc::Sender<ForwardRequest>,
+        service_name: &str,
+        method_path: &str,
+    ) where
+        T: prost::Message + Send + 'static,
+    {
+        let service_name = service_name.to_string();
+        let method_path = method_path.to_string();
+        let timeout = self.config.default_timeout.as_secs() as i32;
+        
+        tokio::spawn(async move {
+            let mut sequence_number = 0i64;
+            
+            // 发送所有请求
+            for request_item in requests {
+                let Ok(payload) = Self::serialize_message_static(&request_item) else {
+                    break;
+                };
+                
+                let mut headers = HashMap::new();
+                headers.insert("x-service-name".to_string(), service_name.clone());
+                
+                let forward_request = ForwardRequest {
+                    request_id: Uuid::new_v4().to_string(),
+                    method_path: method_path.clone(),
+                    headers,
+                    payload,
+                    timeout_seconds: timeout,
+                    streaming_info: Some(StreamingInfo {
+                        stream_type: StreamType::ClientStreaming as i32,
+                        is_stream_end: false,
+                        sequence_number,
+                        chunk_size: 0,
+                    }),
+                };
+                
+                sequence_number += 1;
+                if request_tx.send(forward_request).await.is_err() {
+                    break;
+                }
+            }
+            
+            // 发送结束标记
+            let mut end_headers = HashMap::new();
+            end_headers.insert("x-service-name".to_string(), service_name);
+            
+            let end_request = ForwardRequest {
+                request_id: Uuid::new_v4().to_string(),
+                method_path,
+                headers: end_headers,
+                payload: Vec::new(),
+                timeout_seconds: timeout,
+                streaming_info: Some(StreamingInfo {
+                    stream_type: StreamType::ClientStreaming as i32,
+                    is_stream_end: true,
+                    sequence_number,
+                    chunk_size: 0,
+                }),
+            };
+            
+            let _ = request_tx.send(end_request).await;
+        });
+    }
+
+    /// 发送服务端流请求
+    fn send_server_stream_request<T>(
+        &self,
+        request: T,
+        request_tx: mpsc::Sender<ForwardRequest>,
+        service_name: &str,
+        method_path: &str,
+    ) where
+        T: prost::Message + Send + 'static,
+    {
+        let service_name = service_name.to_string();
+        let method_path = method_path.to_string();
+        let timeout = self.config.default_timeout.as_secs() as i32;
+        
+        tokio::spawn(async move {
+            let Ok(payload) = Self::serialize_message_static(&request) else {
+                return;
+            };
+            
+            let mut headers = HashMap::new();
+            headers.insert("x-service-name".to_string(), service_name);
+            
+            let forward_request = ForwardRequest {
+                request_id: Uuid::new_v4().to_string(),
+                method_path,
+                headers,
+                payload,
+                timeout_seconds: timeout,
+                streaming_info: Some(StreamingInfo {
+                    stream_type: StreamType::ServerStreaming as i32,
+                    is_stream_end: false,
+                    sequence_number: 0,
+                    chunk_size: 0,
+                }),
+            };
+            
+            let _ = request_tx.send(forward_request).await;
+        });
+    }
+
+    /// 启动服务端流响应处理任务
+    fn spawn_server_stream_handler<R>(
+        &self,
+        mut inbound: tonic::Streaming<crate::registry::ConnectionMessage>,
+        response_tx: mpsc::Sender<Result<R, GatewayClientError>>,
+    ) where
+        R: prost::Message + Default + Send + 'static,
+    {
+        tokio::spawn(async move {
+            while let Some(message_result) = inbound.next().await {
+                let message = match message_result {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        let _ = response_tx.send(Err(GatewayClientError::Grpc(e))).await;
+                        break;
+                    }
+                };
+                
+                let Some(crate::registry::connection_message::MessageType::Response(response)) = message.message_type else {
+                    continue;
+                };
+                
+                let result = Self::deserialize_response_static::<R>(response.payload);
+                
+                if response_tx.send(result).await.is_err() {
+                    break;
+                }
+                
+                // 检查流结束标记
+                if let Some(streaming_info) = response.streaming_info
+                    && streaming_info.is_stream_end {
+                    break;
                 }
             }
         });
