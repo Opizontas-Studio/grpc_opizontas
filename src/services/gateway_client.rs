@@ -1,10 +1,8 @@
 use std::collections::HashMap;
-use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 use tonic::transport::{Channel, Endpoint};
-use tonic::Status;
 use uuid::Uuid;
 
 use crate::registry::{
@@ -12,51 +10,15 @@ use crate::registry::{
     streaming_info::StreamType,
     registry_service_client::RegistryServiceClient,
 };
-
-/// 网关客户端错误类型
-#[derive(Debug, thiserror::Error)]
-pub enum GatewayClientError {
-    #[error("Transport error: {0}")]
-    Transport(#[from] tonic::transport::Error),
-    #[error("gRPC error: {0}")]
-    Grpc(#[from] Status),
-    #[error("Serialization error: {0}")]
-    Serialization(String),
-    #[error("Timeout error")]
-    Timeout,
-    #[error("Service not found: {0}")]
-    ServiceNotFound(String),
-}
-
-/// 网关客户端配置
-#[derive(Debug, Clone)]
-pub struct GatewayClientConfig {
-    /// 网关地址
-    pub gateway_address: String,
-    /// 默认超时时间
-    pub default_timeout: Duration,
-    /// 连接超时时间
-    pub connect_timeout: Duration,
-    /// API 密钥
-    pub api_key: String,
-}
-
-impl Default for GatewayClientConfig {
-    fn default() -> Self {
-        Self {
-            gateway_address: "http://localhost:50051".to_string(),
-            default_timeout: Duration::from_secs(30),
-            connect_timeout: Duration::from_secs(10),
-            api_key: String::new(),
-        }
-    }
-}
+use super::client::{
+    GatewayClientConfig, GatewayClientError
+};
 
 /// 网关客户端
 #[derive(Debug, Clone)]
 pub struct GatewayClient {
-    config: GatewayClientConfig,
-    client: RegistryServiceClient<Channel>,
+    pub(crate) config: GatewayClientConfig,
+    pub(crate) client: RegistryServiceClient<Channel>,
 }
 
 impl GatewayClient {
@@ -150,7 +112,7 @@ impl GatewayClient {
         let (request_tx, request_rx) = mpsc::channel(100);
         
         // 发送所有请求
-        self.send_client_stream_requests(requests, request_tx, service_name, method_path);
+        super::client::streaming::send_client_stream_requests(self, requests, request_tx, service_name, method_path);
         
         // 建立连接并等待响应
         let request_stream = ReceiverStream::new(request_rx).map(|req| {
@@ -189,7 +151,7 @@ impl GatewayClient {
         let (request_tx, request_rx) = mpsc::channel(1);
         
         // 发送单个请求
-        self.send_server_stream_request(request, request_tx, service_name, method_path);
+        super::client::streaming::send_server_stream_request(self, request, request_tx, service_name, method_path);
         
         // 建立连接并处理响应流
         let request_stream = ReceiverStream::new(request_rx).map(|req| {
@@ -202,7 +164,7 @@ impl GatewayClient {
         let inbound = response.into_inner();
         
         // 启动响应流处理任务
-        self.spawn_server_stream_handler::<R>(inbound, response_tx);
+        super::client::streaming::spawn_server_stream_handler(inbound, response_tx);
         
         Ok(ReceiverStream::new(response_rx))
     }
@@ -248,275 +210,12 @@ impl GatewayClient {
         let inbound = response.into_inner();
         
         // 启动请求发送任务
-        self.spawn_request_sender(requests, request_tx, service_name, method_path).await;
+        super::client::streaming::spawn_request_sender(self, requests, request_tx, service_name, method_path).await;
         
         // 启动响应处理任务
-        self.spawn_response_handler::<R>(inbound, response_tx).await;
+        super::client::streaming::spawn_response_handler(inbound, response_tx).await;
         
         Ok(ReceiverStream::new(response_rx))
-    }
-
-    /// 启动请求发送任务
-    async fn spawn_request_sender<T>(
-        &self,
-        requests: impl Stream<Item = T> + Send + Unpin + 'static,
-        request_tx: mpsc::Sender<ForwardRequest>,
-        service_name: &str,
-        method_path: &str,
-    ) where
-        T: prost::Message + Send + 'static,
-    {
-        let service_name = service_name.to_string();
-        let method_path = method_path.to_string();
-        let timeout = self.config.default_timeout.as_secs() as i32;
-        
-        tokio::spawn(async move {
-            let mut sequence_number = 0i64;
-            let mut requests = requests;
-            
-            while let Some(request_item) = requests.next().await {
-                let payload = match Self::serialize_message_static(&request_item) {
-                    Ok(p) => p,
-                    Err(_) => break,
-                };
-                
-                let mut headers = HashMap::new();
-                headers.insert("x-service-name".to_string(), service_name.clone());
-                
-                let forward_request = ForwardRequest {
-                    request_id: Uuid::new_v4().to_string(),
-                    method_path: method_path.clone(),
-                    headers,
-                    payload,
-                    timeout_seconds: timeout,
-                    streaming_info: Some(StreamingInfo {
-                        stream_type: StreamType::BidirectionalStreaming as i32,
-                        is_stream_end: false,
-                        sequence_number,
-                        chunk_size: 0,
-                    }),
-                };
-                
-                sequence_number += 1;
-                if request_tx.send(forward_request).await.is_err() {
-                    break;
-                }
-            }
-            
-            // 发送结束标记
-            let mut end_headers = HashMap::new();
-            end_headers.insert("x-service-name".to_string(), service_name);
-            
-            let end_request = ForwardRequest {
-                request_id: Uuid::new_v4().to_string(),
-                method_path,
-                headers: end_headers,
-                payload: Vec::new(),
-                timeout_seconds: timeout,
-                streaming_info: Some(StreamingInfo {
-                    stream_type: StreamType::BidirectionalStreaming as i32,
-                    is_stream_end: true,
-                    sequence_number,
-                    chunk_size: 0,
-                }),
-            };
-            
-            let _ = request_tx.send(end_request).await;
-        });
-    }
-
-    /// 启动响应处理任务
-    async fn spawn_response_handler<R>(
-        &self,
-        mut inbound: impl Stream<Item = Result<crate::registry::ConnectionMessage, Status>> + Send + Unpin + 'static,
-        response_tx: mpsc::Sender<Result<R, GatewayClientError>>,
-    ) where
-        R: prost::Message + Default + Send + 'static,
-    {
-        tokio::spawn(async move {
-            while let Some(message_result) = inbound.next().await {
-                match message_result {
-                    Ok(message) => {
-                        if let Some(crate::registry::connection_message::MessageType::Response(response)) = message.message_type {
-                            let result = Self::deserialize_response_static::<R>(response.payload);
-                            
-                            if response_tx.send(result).await.is_err() {
-                                break;
-                            }
-                            
-                            // 检查流结束
-                            if let Some(streaming_info) = response.streaming_info
-                                && streaming_info.is_stream_end {
-                                    break;
-                                }
-                        }
-                    }
-                    Err(e) => {
-                        let _ = response_tx.send(Err(GatewayClientError::Grpc(e))).await;
-                        break;
-                    }
-                }
-            }
-        });
-    }
-
-    /// 发送客户端流请求
-    fn send_client_stream_requests<T>(
-        &self,
-        requests: impl Iterator<Item = T> + Send + 'static,
-        request_tx: mpsc::Sender<ForwardRequest>,
-        service_name: &str,
-        method_path: &str,
-    ) where
-        T: prost::Message + Send + 'static,
-    {
-        let service_name = service_name.to_string();
-        let method_path = method_path.to_string();
-        let timeout = self.config.default_timeout.as_secs() as i32;
-        
-        tokio::spawn(async move {
-            let mut sequence_number = 0i64;
-            
-            // 发送所有请求
-            for request_item in requests {
-                let Ok(payload) = Self::serialize_message_static(&request_item) else {
-                    break;
-                };
-                
-                let mut headers = HashMap::new();
-                headers.insert("x-service-name".to_string(), service_name.clone());
-                
-                let forward_request = ForwardRequest {
-                    request_id: Uuid::new_v4().to_string(),
-                    method_path: method_path.clone(),
-                    headers,
-                    payload,
-                    timeout_seconds: timeout,
-                    streaming_info: Some(StreamingInfo {
-                        stream_type: StreamType::ClientStreaming as i32,
-                        is_stream_end: false,
-                        sequence_number,
-                        chunk_size: 0,
-                    }),
-                };
-                
-                sequence_number += 1;
-                if request_tx.send(forward_request).await.is_err() {
-                    break;
-                }
-            }
-            
-            // 发送结束标记
-            let mut end_headers = HashMap::new();
-            end_headers.insert("x-service-name".to_string(), service_name);
-            
-            let end_request = ForwardRequest {
-                request_id: Uuid::new_v4().to_string(),
-                method_path,
-                headers: end_headers,
-                payload: Vec::new(),
-                timeout_seconds: timeout,
-                streaming_info: Some(StreamingInfo {
-                    stream_type: StreamType::ClientStreaming as i32,
-                    is_stream_end: true,
-                    sequence_number,
-                    chunk_size: 0,
-                }),
-            };
-            
-            let _ = request_tx.send(end_request).await;
-        });
-    }
-
-    /// 发送服务端流请求
-    fn send_server_stream_request<T>(
-        &self,
-        request: T,
-        request_tx: mpsc::Sender<ForwardRequest>,
-        service_name: &str,
-        method_path: &str,
-    ) where
-        T: prost::Message + Send + 'static,
-    {
-        let service_name = service_name.to_string();
-        let method_path = method_path.to_string();
-        let timeout = self.config.default_timeout.as_secs() as i32;
-        
-        tokio::spawn(async move {
-            let Ok(payload) = Self::serialize_message_static(&request) else {
-                return;
-            };
-            
-            let mut headers = HashMap::new();
-            headers.insert("x-service-name".to_string(), service_name);
-            
-            let forward_request = ForwardRequest {
-                request_id: Uuid::new_v4().to_string(),
-                method_path,
-                headers,
-                payload,
-                timeout_seconds: timeout,
-                streaming_info: Some(StreamingInfo {
-                    stream_type: StreamType::ServerStreaming as i32,
-                    is_stream_end: false,
-                    sequence_number: 0,
-                    chunk_size: 0,
-                }),
-            };
-            
-            let _ = request_tx.send(forward_request).await;
-        });
-    }
-
-    /// 启动服务端流响应处理任务
-    fn spawn_server_stream_handler<R>(
-        &self,
-        mut inbound: tonic::Streaming<crate::registry::ConnectionMessage>,
-        response_tx: mpsc::Sender<Result<R, GatewayClientError>>,
-    ) where
-        R: prost::Message + Default + Send + 'static,
-    {
-        tokio::spawn(async move {
-            while let Some(message_result) = inbound.next().await {
-                let message = match message_result {
-                    Ok(msg) => msg,
-                    Err(e) => {
-                        let _ = response_tx.send(Err(GatewayClientError::Grpc(e))).await;
-                        break;
-                    }
-                };
-                
-                let Some(crate::registry::connection_message::MessageType::Response(response)) = message.message_type else {
-                    continue;
-                };
-                
-                let result = Self::deserialize_response_static::<R>(response.payload);
-                
-                if response_tx.send(result).await.is_err() {
-                    break;
-                }
-                
-                // 检查流结束标记
-                if let Some(streaming_info) = response.streaming_info
-                    && streaming_info.is_stream_end {
-                    break;
-                }
-            }
-        });
-    }
-
-    /// 静态方法：序列化消息
-    fn serialize_message_static<T: prost::Message>(message: &T) -> Result<Vec<u8>, GatewayClientError> {
-        let mut buf = Vec::new();
-        message.encode(&mut buf)
-            .map_err(|e| GatewayClientError::Serialization(e.to_string()))?;
-        Ok(buf)
-    }
-
-    /// 静态方法：反序列化响应
-    fn deserialize_response_static<R: prost::Message + Default>(response_bytes: Vec<u8>) -> Result<R, GatewayClientError> {
-        R::decode(&response_bytes[..])
-            .map_err(|e| GatewayClientError::Serialization(e.to_string()))
     }
 
     /// 序列化消息
@@ -535,7 +234,6 @@ impl GatewayClient {
         R::decode(&response_bytes[..])
             .map_err(|e| GatewayClientError::Serialization(e.to_string()))
     }
-
 
     /// 获取健康的服务列表
     pub async fn list_healthy_services(&mut self) -> Result<HashMap<String, String>, GatewayClientError> {
