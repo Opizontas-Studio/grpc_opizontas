@@ -187,7 +187,7 @@ where
                 match target_addr {
                     Some(ref addr) => {
                         // 转发请求到目标服务
-                        match forwarder::forward_request(&client_manager, &config, req, &addr).await
+                        match forwarder::forward_request(&client_manager, &config, req, addr).await
                         {
                             Ok(response) => Ok(response),
                             Err(e) => {

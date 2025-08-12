@@ -338,21 +338,17 @@ impl GatewayClient {
                 match message_result {
                     Ok(message) => {
                         if let Some(crate::registry::connection_message::MessageType::Response(response)) = message.message_type {
-                            let result = match Self::deserialize_response_static::<R>(response.payload) {
-                                Ok(response_obj) => Ok(response_obj),
-                                Err(e) => Err(e),
-                            };
+                            let result = Self::deserialize_response_static::<R>(response.payload);
                             
                             if response_tx.send(result).await.is_err() {
                                 break;
                             }
                             
                             // 检查流结束
-                            if let Some(streaming_info) = response.streaming_info {
-                                if streaming_info.is_stream_end {
+                            if let Some(streaming_info) = response.streaming_info
+                                && streaming_info.is_stream_end {
                                     break;
                                 }
-                            }
                         }
                     }
                     Err(e) => {

@@ -241,7 +241,7 @@ impl MyRegistryService {
         );
 
         let request_id = request.request_id.clone();
-        let streaming_info = request.streaming_info.clone();
+        let streaming_info = request.streaming_info;
 
         tokio::spawn(async move {
             let result = MyRegistryService::handle_service_request(std::sync::Arc::new(reverse_manager), request).await;
