@@ -2,18 +2,13 @@ syntax = "proto3";
 
 package recommendation;
 
-import "google/protobuf/empty.proto";
-
 // Service Definition
 service RecommendationService {
   // 根据 ID 获取一个安利小纸条
   rpc GetRecommendation (GetRecommendationRequest) returns (RecommendationSlip);
 
-  // 删除一个小纸条
-  rpc DeleteRecommendation (DeleteRecommendationRequest) returns (google.protobuf.Empty);
-
-  // 屏蔽或取消屏蔽一个小纸条
-  rpc BlockRecommendation (BlockRecommendationRequest) returns (RecommendationSlip);
+  // 查询一个用户ID全部的小纸条
+  rpc GetRecommendationsByAuthor (GetRecommendationsByAuthorRequest) returns (GetRecommendationsByAuthorResponse);
 }
 
 // Message Definitions
@@ -35,11 +30,10 @@ message GetRecommendationRequest {
   string id = 1;
 }
 
-message DeleteRecommendationRequest {
-  string id = 1;
+message GetRecommendationsByAuthorRequest {
+  string author_id = 1;
 }
 
-message BlockRecommendationRequest {
-  string id = 1;
-  bool block = 2; // true 为屏蔽, false 为取消屏蔽
+message GetRecommendationsByAuthorResponse {
+  repeated RecommendationSlip recommendations = 1;
 }
