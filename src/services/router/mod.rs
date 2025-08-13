@@ -6,7 +6,7 @@ pub mod response;
 pub use error::RouterError;
 
 use super::client_manager::GrpcClientManager;
-use super::registry_service::{ServiceHealthStatus, ServiceRegistry};
+use crate::services::registry::{ServiceHealthStatus, ServiceRegistry};
 use super::reverse_connection_manager::ReverseConnectionManager;
 use crate::config::Config;
 use futures::future::BoxFuture;
@@ -185,9 +185,9 @@ where
                 );
 
                 match target_addr {
-                    Some(addr) => {
+                    Some(ref addr) => {
                         // 转发请求到目标服务
-                        match forwarder::forward_request(&client_manager, &config, req, &addr).await
+                        match forwarder::forward_request(&client_manager, &config, req, addr).await
                         {
                             Ok(response) => Ok(response),
                             Err(e) => {

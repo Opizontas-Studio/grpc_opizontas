@@ -59,7 +59,7 @@ impl Default for ReverseConnectionConfig {
 }
 
 // 反向连接管理器
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ReverseConnectionManager {
     // 服务名 -> 反向连接映射
     connections_by_service: Arc<DashMap<String, ReverseConnection>>,
@@ -166,13 +166,27 @@ impl ReverseConnectionManager {
         headers: std::collections::HashMap<String, String>,
         payload: Vec<u8>,
     ) -> Result<ForwardResponse, String> {
+        // 生成新的请求ID
+        let request_id = Uuid::new_v4().to_string();
+        self.send_request_with_id(&request_id, service_name, method_path, headers, payload).await
+    }
+
+    // 使用指定的请求ID发送请求到微服务并等待响应
+    pub async fn send_request_with_id(
+        &self,
+        request_id: &str,
+        service_name: &str,
+        method_path: &str,
+        headers: std::collections::HashMap<String, String>,
+        payload: Vec<u8>,
+    ) -> Result<ForwardResponse, String> {
         // 获取连接
         let connection = self
             .get_connection_for_service(service_name)
             .ok_or_else(|| format!("No reverse connection found for service: {service_name}"))?;
 
-        // 生成请求ID
-        let request_id = Uuid::new_v4().to_string();
+        // 使用传入的请求ID
+        let request_id = request_id.to_string();
 
         // 创建响应通道
         let (response_sender, response_receiver) = oneshot::channel();
@@ -200,6 +214,12 @@ impl ReverseConnectionManager {
             headers,
             payload,
             timeout_seconds: self.config.request_timeout.as_secs() as i32,
+            streaming_info: Some(crate::registry::StreamingInfo {
+                stream_type: crate::registry::streaming_info::StreamType::Unary as i32,
+                is_stream_end: true,
+                sequence_number: 0,
+                chunk_size: 0,
+            }),
         };
 
         let message = ConnectionMessage {

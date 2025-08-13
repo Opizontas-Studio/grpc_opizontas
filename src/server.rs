@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::registry::registry_service_server::RegistryServiceServer;
-use crate::services::registry_service::MyRegistryService;
+use crate::services::registry::MyRegistryService;
 use crate::services::router::DynamicRouter;
 use tonic::transport::Server;
 
@@ -26,7 +26,6 @@ pub async fn start() -> Result<(), Box<dyn std::error::Error>> {
     // 注册服务请求会被动态路由器识别并转发到注册服务
     Server::builder()
         .add_service(tower::ServiceBuilder::new().service(router))
-        // 同时也注册官方的注册服务，用于处理服务注册请求
         .add_service(RegistryServiceServer::new(registry_service))
         .serve(addr)
         .await?;

@@ -168,12 +168,11 @@ impl GrpcClientManager {
             }
         }
 
-        if let Some(key) = oldest_key {
-            if self.clients.remove(&key).is_some() {
+        if let Some(key) = oldest_key
+            && self.clients.remove(&key).is_some() {
                 self.increment_stat("connections_evicted");
                 tracing::debug!(evicted_connection = %key, "Evicted oldest connection");
             }
-        }
     }
 
     fn start_cleanup_task(&self) {
