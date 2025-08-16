@@ -6,6 +6,7 @@ use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 use crate::registry::{ConnectionMessage, ForwardRequest, ForwardResponse};
+use crate::services::registry::types::ServiceRegistry;
 
 // 反向连接元数据
 #[derive(Debug, Clone)]
@@ -67,22 +68,25 @@ pub struct ReverseConnectionManager {
     connections_by_id: Arc<DashMap<String, ReverseConnection>>,
     // 等待响应的请求
     pending_requests: Arc<RwLock<DashMap<String, PendingRequest>>>,
+    // 主服务注册表的引用，用于同步清理
+    service_registry: Option<ServiceRegistry>,
     config: ReverseConnectionConfig,
     task_tracker: Arc<TaskTracker>,
 }
 
 impl Default for ReverseConnectionManager {
     fn default() -> Self {
-        Self::new(ReverseConnectionConfig::default())
+        Self::new(ReverseConnectionConfig::default(), None)
     }
 }
 
 impl ReverseConnectionManager {
-    pub fn new(config: ReverseConnectionConfig) -> Self {
+    pub fn new(config: ReverseConnectionConfig, service_registry: Option<ServiceRegistry>) -> Self {
         let manager = Self {
             connections_by_service: Arc::new(DashMap::new()),
             connections_by_id: Arc::new(DashMap::new()),
             pending_requests: Arc::new(RwLock::new(DashMap::new())),
+            service_registry,
             config: config.clone(),
             task_tracker: Arc::new(TaskTracker::new()),
         };
@@ -134,6 +138,18 @@ impl ReverseConnectionManager {
             // 从服务映射中移除
             for service in &connection.services {
                 self.connections_by_service.remove(service);
+                
+                // 同时从主服务注册表中移除该服务
+                if let Some(ref service_registry) = self.service_registry {
+                    if service_registry.remove(service).is_some() {
+                        tracing::info!(
+                            service_name = %service,
+                            connection_id = %connection_id,
+                            "Removed service from main registry due to reverse connection disconnection"
+                        );
+                    }
+                }
+                
                 tracing::info!(
                     service_name = %service,
                     connection_id = %connection_id,
@@ -323,11 +339,20 @@ impl ReverseConnectionManager {
 
         // 移除过期连接
         for (connection_id, services) in expired_connections {
-            tracing::warn!(connection_id = %connection_id, "Removing expired reverse connection");
+            tracing::warn!(
+                connection_id = %connection_id,
+                services_count = services.len(),
+                "Removing expired reverse connection"
+            );
 
             connections_by_id.remove(&connection_id);
-            for service in services {
-                connections_by_service.remove(&service);
+            for service in &services {
+                connections_by_service.remove(service);
+                tracing::debug!(
+                    service_name = %service,
+                    connection_id = %connection_id,
+                    "Removed expired reverse connection for service"
+                );
             }
         }
     }

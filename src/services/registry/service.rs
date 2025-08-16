@@ -24,10 +24,12 @@ impl MyRegistryService {
             max_pending_requests: config.reverse_connection.max_pending_requests,
         };
 
+        let registry = Arc::new(dashmap::DashMap::new());
+        
         let service = Self {
-            registry: Arc::new(dashmap::DashMap::new()),
+            registry: registry.clone(),
             config,
-            reverse_connection_manager: Arc::new(ReverseConnectionManager::new(reverse_config)),
+            reverse_connection_manager: Arc::new(ReverseConnectionManager::new(reverse_config, Some(registry))),
         };
 
         // 启动定期清理任务
@@ -102,10 +104,20 @@ impl MyRegistryService {
 
             if let Ok(elapsed) = now.duration_since(service_info.last_heartbeat) {
                 if elapsed > timeout {
-                    tracing::warn!(service_name = %service_name, elapsed_secs = elapsed.as_secs(), "Service expired, removing from registry");
+                    tracing::warn!(
+                        service_name = %service_name, 
+                        elapsed_secs = elapsed.as_secs(),
+                        timeout_secs = timeout.as_secs(),
+                        "Service expired due to heartbeat timeout, removing from registry"
+                    );
                     to_remove.push(service_name.clone());
                 } else {
-                    tracing::debug!(service_name = %service_name, last_heartbeat_secs = elapsed.as_secs(), "Service is healthy");
+                    tracing::debug!(
+                        service_name = %service_name, 
+                        last_heartbeat_secs = elapsed.as_secs(),
+                        timeout_secs = timeout.as_secs(),
+                        "Service is healthy"
+                    );
                 }
             }
         }
@@ -120,7 +132,12 @@ impl MyRegistryService {
 
         // 删除过期的服务
         for service_name in to_remove {
-            registry.remove(&service_name);
+            if registry.remove(&service_name).is_some() {
+                tracing::info!(
+                    service_name = %service_name,
+                    "Successfully removed expired service from registry"
+                );
+            }
         }
     }
 
