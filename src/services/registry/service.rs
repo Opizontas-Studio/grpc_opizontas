@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use crate::services::reverse_connection_manager::ReverseConnectionManager;
+use crate::services::connection::{ReverseConnectionManager, ReverseConnectionConfig};
 use super::types::{ServiceHealthStatus, ServiceInfo, ServiceRegistry};
 use crate::config::Config;
 
@@ -17,7 +17,7 @@ pub struct MyRegistryService {
 impl MyRegistryService {
     pub fn new(config: Config) -> Self {
         // 创建反向连接管理器配置
-        let reverse_config = crate::services::reverse_connection_manager::ReverseConnectionConfig {
+        let reverse_config = ReverseConnectionConfig {
             heartbeat_timeout: Duration::from_secs(config.reverse_connection.heartbeat_timeout),
             request_timeout: Duration::from_secs(config.reverse_connection.request_timeout),
             cleanup_interval: Duration::from_secs(config.reverse_connection.cleanup_interval),

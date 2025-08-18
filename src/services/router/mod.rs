@@ -7,7 +7,7 @@ pub use error::RouterError;
 
 use super::client_manager::GrpcClientManager;
 use crate::services::registry::{ServiceHealthStatus, ServiceRegistry};
-use super::reverse_connection_manager::ReverseConnectionManager;
+use super::connection::ReverseConnectionManager;
 use crate::config::Config;
 use futures::future::BoxFuture;
 use http_body::Body;
@@ -89,7 +89,7 @@ impl DynamicRouter {
             http::Response::builder().status(forward_response.status_code as u16);
 
         // 检查是否为流式响应
-        let is_streaming = super::reverse_connection_manager::ReverseConnectionManager::is_streaming_response(&forward_response);
+        let is_streaming = ReverseConnectionManager::is_streaming_response(&forward_response);
         
         // 添加响应头
         for (name, value) in forward_response.headers {

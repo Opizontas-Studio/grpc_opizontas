@@ -1,74 +1,17 @@
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::sync::{mpsc, RwLock};
 use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 use crate::registry::{ConnectionMessage, ForwardRequest, ForwardResponse};
 use crate::services::registry::types::ServiceRegistry;
 
-// 反向连接元数据
-#[derive(Debug, Clone)]
-pub struct ReverseConnection {
-    pub connection_id: String,
-    pub services: Vec<String>,
-    pub created_at: Instant,
-    pub last_heartbeat: Instant,
-    pub is_active: bool,
-    // 用于向微服务发送请求的发送端
-    pub request_sender: mpsc::UnboundedSender<ConnectionMessage>,
-}
-
-impl ReverseConnection {
-
-    pub fn update_heartbeat(&mut self) {
-        self.last_heartbeat = Instant::now();
-    }
-
-    pub fn is_expired(&self, timeout: Duration) -> bool {
-        Instant::now().duration_since(self.last_heartbeat) > timeout
-    }
-}
-
-// 等待中的请求
-#[derive(Debug)]
-pub struct PendingRequest {
-    pub request_id: String,
-    pub created_at: Instant,
-    pub response_sender: oneshot::Sender<ForwardResponse>,
-}
-
-// 流式响应处理器
-#[derive(Debug)]
-pub struct StreamingResponseHandler {
-    pub request_id: String,
-    pub chunks: std::collections::BTreeMap<i64, Vec<u8>>, // chunk_index -> data
-    pub next_expected_chunk: i64,
-    pub is_complete: bool,
-    pub total_size: Option<i64>,
-    pub response_sender: oneshot::Sender<ForwardResponse>,
-}
-
-// 反向连接管理器配置
-#[derive(Debug, Clone)]
-pub struct ReverseConnectionConfig {
-    pub heartbeat_timeout: Duration,
-    pub request_timeout: Duration,
-    pub cleanup_interval: Duration,
-    pub max_pending_requests: usize,
-}
-
-impl Default for ReverseConnectionConfig {
-    fn default() -> Self {
-        Self {
-            heartbeat_timeout: Duration::from_secs(120),
-            request_timeout: Duration::from_secs(30),
-            cleanup_interval: Duration::from_secs(60),
-            max_pending_requests: 1000,
-        }
-    }
-}
+use super::{
+    connection::ReverseConnection,
+    types::{PendingRequest, ReverseConnectionConfig, StreamingResponseHandler},
+};
 
 // 反向连接管理器
 #[derive(Debug, Clone)]
@@ -152,7 +95,7 @@ impl ReverseConnectionManager {
             // 从服务映射中移除
             for service in &connection.services {
                 self.connections_by_service.remove(service);
-                
+
                 // 同时从主服务注册表中移除该服务
                 if let Some(ref service_registry) = self.service_registry {
                     if service_registry.remove(service).is_some() {
@@ -163,7 +106,7 @@ impl ReverseConnectionManager {
                         );
                     }
                 }
-                
+
                 tracing::info!(
                     service_name = %service,
                     connection_id = %connection_id,
@@ -198,7 +141,8 @@ impl ReverseConnectionManager {
     ) -> Result<ForwardResponse, String> {
         // 生成新的请求ID
         let request_id = Uuid::new_v4().to_string();
-        self.send_request_with_id(&request_id, service_name, method_path, headers, payload).await
+        self.send_request_with_id(&request_id, service_name, method_path, headers, payload)
+            .await
     }
 
     // 流式发送请求到微服务并等待响应
@@ -214,21 +158,27 @@ impl ReverseConnectionManager {
         B::Error: Into<Box<dyn std::error::Error + Send + Sync>> + std::fmt::Debug,
     {
         use http_body_util::BodyExt;
-        
+
         // 对于现有的API兼容性，仍然需要收集body
         // 但这里可以添加大小限制来避免无限内存使用
-        let collected = body.collect().await
+        let collected = body
+            .collect()
+            .await
             .map_err(|e| format!("Failed to collect request body: {e:?}"))?;
         let payload = collected.to_bytes().to_vec();
-        
+
         // 如果payload太大，可以在这里添加大小检查
         const MAX_BODY_SIZE: usize = 100 * 1024 * 1024; // 100MB
         if payload.len() > MAX_BODY_SIZE {
-            return Err(format!("Request body too large: {} bytes (max: {} bytes)", 
-                payload.len(), MAX_BODY_SIZE));
+            return Err(format!(
+                "Request body too large: {} bytes (max: {} bytes)",
+                payload.len(),
+                MAX_BODY_SIZE
+            ));
         }
-        
-        self.send_request(service_name, method_path, headers, payload).await
+
+        self.send_request(service_name, method_path, headers, payload)
+            .await
     }
 
     // 使用指定的请求ID发送请求到微服务并等待响应
@@ -249,7 +199,7 @@ impl ReverseConnectionManager {
         let request_id = request_id.to_string();
 
         // 创建响应通道
-        let (response_sender, response_receiver) = oneshot::channel();
+        let (response_sender, response_receiver) = tokio::sync::oneshot::channel();
 
         // 存储等待中的请求
         {
@@ -342,8 +292,8 @@ impl ReverseConnectionManager {
             }
         };
 
-        let mut streaming_handlers = self.streaming_handlers.write().await;
-        
+        let streaming_handlers = self.streaming_handlers.write().await;
+
         // 检查是否已有处理器
         if !streaming_handlers.contains_key(&response.request_id) {
             // 这是一个新的流式响应，需要从 pending_requests 中获取 sender
@@ -370,7 +320,9 @@ impl ReverseConnectionManager {
         };
 
         // 添加数据块
-        handler.chunks.insert(stream_info.chunk_index, response.payload.clone());
+        handler
+            .chunks
+            .insert(stream_info.chunk_index, response.payload.clone());
 
         // 检查是否可以组装完整响应
         if stream_info.is_final_chunk {
@@ -437,7 +389,8 @@ impl ReverseConnectionManager {
 
     // 检查响应是否为流式响应
     pub fn is_streaming_response(response: &ForwardResponse) -> bool {
-        response.response_stream_info
+        response
+            .response_stream_info
             .as_ref()
             .map(|info| info.is_streamed)
             .unwrap_or(false)
@@ -449,8 +402,8 @@ impl ReverseConnectionManager {
     }
 
     // 获取连接统计信息
-    pub fn get_stats(&self) -> ConnectionStats {
-        ConnectionStats {
+    pub fn get_stats(&self) -> super::types::ConnectionStats {
+        super::types::ConnectionStats {
             active_connections: self.connections_by_id.len(),
             registered_services: self.connections_by_service.len(),
         }
@@ -544,13 +497,6 @@ impl ReverseConnectionManager {
             }
         }
     }
-}
-
-// 连接统计信息
-#[derive(Debug, Clone)]
-pub struct ConnectionStats {
-    pub active_connections: usize,
-    pub registered_services: usize,
 }
 
 impl Drop for ReverseConnectionManager {

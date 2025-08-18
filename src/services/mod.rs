@@ -1,7 +1,7 @@
 pub mod client;
 pub mod client_manager;
 pub mod registry;
-pub mod reverse_connection_manager;
+pub mod connection;
 pub mod router;
 pub mod gateway_client;
 

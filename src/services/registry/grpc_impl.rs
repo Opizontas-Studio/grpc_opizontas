@@ -159,7 +159,7 @@ impl RegistryService for MyRegistryService {
 impl MyRegistryService {
     fn spawn_inbound_message_handler(
         mut inbound: Streaming<ConnectionMessage>,
-        reverse_manager: crate::services::reverse_connection_manager::ReverseConnectionManager,
+        reverse_manager: crate::services::connection::ReverseConnectionManager,
         connection_id: String,
         outbound_tx: mpsc::Sender<Result<ConnectionMessage, Status>>,
     ) {
@@ -192,7 +192,7 @@ impl MyRegistryService {
 
     async fn handle_message_type(
         message_type: MessageType,
-        reverse_manager: &crate::services::reverse_connection_manager::ReverseConnectionManager,
+        reverse_manager: &crate::services::connection::ReverseConnectionManager,
         outbound_tx: &mpsc::Sender<Result<ConnectionMessage, Status>>,
     ) -> bool {
         match message_type {
@@ -231,7 +231,7 @@ impl MyRegistryService {
 
     async fn handle_service_to_service_request(
         request: crate::registry::ForwardRequest,
-        reverse_manager: crate::services::reverse_connection_manager::ReverseConnectionManager,
+        reverse_manager: crate::services::connection::ReverseConnectionManager,
         outbound_tx: mpsc::Sender<Result<ConnectionMessage, Status>>,
     ) {
         tracing::debug!(
