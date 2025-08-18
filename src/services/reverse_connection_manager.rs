@@ -39,6 +39,17 @@ pub struct PendingRequest {
     pub response_sender: oneshot::Sender<ForwardResponse>,
 }
 
+// 流式响应处理器
+#[derive(Debug)]
+pub struct StreamingResponseHandler {
+    pub request_id: String,
+    pub chunks: std::collections::BTreeMap<i64, Vec<u8>>, // chunk_index -> data
+    pub next_expected_chunk: i64,
+    pub is_complete: bool,
+    pub total_size: Option<i64>,
+    pub response_sender: oneshot::Sender<ForwardResponse>,
+}
+
 // 反向连接管理器配置
 #[derive(Debug, Clone)]
 pub struct ReverseConnectionConfig {
@@ -68,6 +79,8 @@ pub struct ReverseConnectionManager {
     connections_by_id: Arc<DashMap<String, ReverseConnection>>,
     // 等待响应的请求
     pending_requests: Arc<RwLock<DashMap<String, PendingRequest>>>,
+    // 流式响应处理器
+    streaming_handlers: Arc<RwLock<DashMap<String, StreamingResponseHandler>>>,
     // 主服务注册表的引用，用于同步清理
     service_registry: Option<ServiceRegistry>,
     config: ReverseConnectionConfig,
@@ -86,6 +99,7 @@ impl ReverseConnectionManager {
             connections_by_service: Arc::new(DashMap::new()),
             connections_by_id: Arc::new(DashMap::new()),
             pending_requests: Arc::new(RwLock::new(DashMap::new())),
+            streaming_handlers: Arc::new(RwLock::new(DashMap::new())),
             service_registry,
             config: config.clone(),
             task_tracker: Arc::new(TaskTracker::new()),
@@ -187,6 +201,36 @@ impl ReverseConnectionManager {
         self.send_request_with_id(&request_id, service_name, method_path, headers, payload).await
     }
 
+    // 流式发送请求到微服务并等待响应
+    pub async fn send_request_stream<B>(
+        &self,
+        service_name: &str,
+        method_path: &str,
+        headers: std::collections::HashMap<String, String>,
+        body: B,
+    ) -> Result<ForwardResponse, String>
+    where
+        B: http_body::Body<Data = bytes::Bytes> + Send + 'static,
+        B::Error: Into<Box<dyn std::error::Error + Send + Sync>> + std::fmt::Debug,
+    {
+        use http_body_util::BodyExt;
+        
+        // 对于现有的API兼容性，仍然需要收集body
+        // 但这里可以添加大小限制来避免无限内存使用
+        let collected = body.collect().await
+            .map_err(|e| format!("Failed to collect request body: {e:?}"))?;
+        let payload = collected.to_bytes().to_vec();
+        
+        // 如果payload太大，可以在这里添加大小检查
+        const MAX_BODY_SIZE: usize = 100 * 1024 * 1024; // 100MB
+        if payload.len() > MAX_BODY_SIZE {
+            return Err(format!("Request body too large: {} bytes (max: {} bytes)", 
+                payload.len(), MAX_BODY_SIZE));
+        }
+        
+        self.send_request(service_name, method_path, headers, payload).await
+    }
+
     // 使用指定的请求ID发送请求到微服务并等待响应
     pub async fn send_request_with_id(
         &self,
@@ -272,14 +316,131 @@ impl ReverseConnectionManager {
 
     // 处理来自微服务的响应
     pub async fn handle_response(&self, response: ForwardResponse) {
-        let pending_requests = self.pending_requests.read().await;
-        if let Some((_id, pending)) = pending_requests.remove(&response.request_id) {
-            if pending.response_sender.send(response).is_err() {
-                tracing::warn!(request_id = %pending.request_id, "Failed to send response to waiting client");
-            }
+        // 检查是否为流式响应
+        if Self::is_streaming_response(&response) {
+            self.handle_streaming_response(response).await;
         } else {
-            tracing::warn!(request_id = %response.request_id, "Received response for unknown request");
+            // 处理常规响应
+            let pending_requests = self.pending_requests.read().await;
+            if let Some((_id, pending)) = pending_requests.remove(&response.request_id) {
+                if pending.response_sender.send(response).is_err() {
+                    tracing::warn!(request_id = %pending.request_id, "Failed to send response to waiting client");
+                }
+            } else {
+                tracing::warn!(request_id = %response.request_id, "Received response for unknown request");
+            }
         }
+    }
+
+    // 处理流式响应
+    async fn handle_streaming_response(&self, response: ForwardResponse) {
+        let stream_info = match response.response_stream_info.as_ref() {
+            Some(info) => info,
+            None => {
+                tracing::error!(request_id = %response.request_id, "Missing stream info in streaming response");
+                return;
+            }
+        };
+
+        let mut streaming_handlers = self.streaming_handlers.write().await;
+        
+        // 检查是否已有处理器
+        if !streaming_handlers.contains_key(&response.request_id) {
+            // 这是一个新的流式响应，需要从 pending_requests 中获取 sender
+            let pending_requests = self.pending_requests.read().await;
+            if let Some((_id, pending)) = pending_requests.remove(&response.request_id) {
+                let handler = StreamingResponseHandler {
+                    request_id: response.request_id.clone(),
+                    chunks: std::collections::BTreeMap::new(),
+                    next_expected_chunk: 0,
+                    is_complete: false,
+                    total_size: stream_info.total_size,
+                    response_sender: pending.response_sender,
+                };
+                streaming_handlers.insert(response.request_id.clone(), handler);
+            } else {
+                tracing::warn!(request_id = %response.request_id, "No pending request found for streaming response");
+                return;
+            }
+        }
+
+        let mut handler = match streaming_handlers.get_mut(&response.request_id) {
+            Some(h) => h,
+            None => return,
+        };
+
+        // 添加数据块
+        handler.chunks.insert(stream_info.chunk_index, response.payload.clone());
+
+        // 检查是否可以组装完整响应
+        if stream_info.is_final_chunk {
+            handler.is_complete = true;
+        }
+
+        // 尝试组装完整的响应
+        if handler.is_complete {
+            let mut complete_payload = Vec::new();
+            for chunk_index in 0..=stream_info.chunk_index {
+                if let Some(chunk_data) = handler.chunks.remove(&chunk_index) {
+                    complete_payload.extend(chunk_data);
+                } else {
+                    tracing::error!(request_id = %response.request_id, chunk_index, "Missing chunk in streaming response");
+                    return;
+                }
+            }
+
+            // 创建完整的响应
+            let complete_response = ForwardResponse {
+                request_id: response.request_id.clone(),
+                status_code: response.status_code,
+                headers: response.headers,
+                payload: complete_payload,
+                error_message: response.error_message,
+                streaming_info: response.streaming_info,
+                response_stream_info: None, // 清除流式信息，因为这是最终的完整响应
+            };
+
+            // 发送完整响应
+            if let Some((_id, handler)) = streaming_handlers.remove(&response.request_id) {
+                if handler.response_sender.send(complete_response).is_err() {
+                    tracing::warn!(request_id = %response.request_id, "Failed to send complete streaming response to waiting client");
+                }
+            }
+        }
+    }
+
+    // 创建流式响应块
+    pub fn create_response_chunk(
+        request_id: String,
+        chunk_data: Vec<u8>,
+        chunk_index: i64,
+        is_final: bool,
+        total_size: Option<i64>,
+    ) -> ForwardResponse {
+        let chunk_size = chunk_data.len() as i32;
+        ForwardResponse {
+            request_id,
+            status_code: 200,
+            headers: std::collections::HashMap::new(),
+            payload: chunk_data,
+            error_message: String::new(),
+            streaming_info: None,
+            response_stream_info: Some(crate::registry::ResponseStreamInfo {
+                is_streamed: true,
+                chunk_index,
+                is_final_chunk: is_final,
+                chunk_size,
+                total_size,
+            }),
+        }
+    }
+
+    // 检查响应是否为流式响应
+    pub fn is_streaming_response(response: &ForwardResponse) -> bool {
+        response.response_stream_info
+            .as_ref()
+            .map(|info| info.is_streamed)
+            .unwrap_or(false)
     }
 
     // 检查服务是否支持反向连接

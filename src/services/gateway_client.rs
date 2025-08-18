@@ -218,12 +218,17 @@ impl GatewayClient {
         Ok(ReceiverStream::new(response_rx))
     }
 
-    /// 序列化消息
+    /// 序列化消息（优化内存使用）
     fn serialize_message<T: prost::Message>(&self, message: &T) -> Result<Vec<u8>, GatewayClientError> {
-        let mut buf = Vec::new();
+        // 估算消息大小以减少重新分配
+        let estimated_size = message.encoded_len();
+        let mut buf = bytes::BytesMut::with_capacity(estimated_size);
+        
         message.encode(&mut buf)
             .map_err(|e| GatewayClientError::Serialization(e.to_string()))?;
-        Ok(buf)
+        
+        // 转换为Vec<u8>以保持API兼容性
+        Ok(buf.to_vec())
     }
 
     /// 反序列化响应

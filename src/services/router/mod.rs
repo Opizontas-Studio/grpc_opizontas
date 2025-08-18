@@ -49,7 +49,7 @@ impl DynamicRouter {
         }
     }
 
-    // 通过反向连接转发请求
+    // 通过反向连接转发请求（流式版本）
     async fn forward_via_reverse_connection<B>(
         reverse_manager: &std::sync::Arc<ReverseConnectionManager>,
         service_name: &str,
@@ -79,33 +79,37 @@ impl DynamicRouter {
             }
         }
 
-        // 收集请求体
-        let body_bytes = match body.collect().await {
-            Ok(collected) => collected.to_bytes().to_vec(),
-            Err(e) => {
-                return Err(format!("Failed to collect request body: {e:?}"));
-            }
-        };
-
-        // 通过反向连接发送请求
+        // 使用流式处理请求体
         let forward_response = reverse_manager
-            .send_request(service_name, method_path, headers, body_bytes)
+            .send_request_stream(service_name, method_path, headers, body)
             .await?;
 
         // 构建 HTTP 响应
         let mut response_builder =
             http::Response::builder().status(forward_response.status_code as u16);
 
+        // 检查是否为流式响应
+        let is_streaming = super::reverse_connection_manager::ReverseConnectionManager::is_streaming_response(&forward_response);
+        
         // 添加响应头
         for (name, value) in forward_response.headers {
             response_builder = response_builder.header(name, value);
         }
 
-        // 创建响应体
-        let response_body = http_body_util::combinators::UnsyncBoxBody::new(
-            http_body_util::Full::new(bytes::Bytes::from(forward_response.payload))
-                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) }),
-        );
+        // 创建响应体（支持流式响应）
+        let response_body = if is_streaming {
+            // 对于流式响应，直接使用payload，因为它们已经在reverse_connection_manager中被组装了
+            http_body_util::combinators::UnsyncBoxBody::new(
+                http_body_util::Full::new(bytes::Bytes::from(forward_response.payload))
+                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) }),
+            )
+        } else {
+            // 常规响应
+            http_body_util::combinators::UnsyncBoxBody::new(
+                http_body_util::Full::new(bytes::Bytes::from(forward_response.payload))
+                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) }),
+            )
+        };
 
         response_builder
             .body(response_body)

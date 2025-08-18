@@ -273,6 +273,7 @@ impl MyRegistryService {
                     payload: Vec::new(),
                     error_message: e,
                     streaming_info,
+                    response_stream_info: None,
                 };
                 let error_msg = ConnectionMessage {
                     message_type: Some(MessageType::Response(error_response)),
