@@ -87,9 +87,11 @@ impl MyRegistryService {
         if service_parts.len() < 2 {
             return Err("Invalid service path format".to_string());
         }
-        let service_name = service_parts[0];
-
-        Ok(service_name.to_string())
+        
+        // 返回完整的服务名称（包含包名），而不是只返回第一部分
+        // 例如：从 "amwaybot.RecommendationService" 返回 "amwaybot.RecommendationService"
+        // 而不是只返回 "amwaybot"
+        Ok(service_part.to_string())
     }
 
     // 清理过期的服务
