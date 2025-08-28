@@ -125,10 +125,51 @@ impl ReverseConnectionManager {
 
     // 获取服务的反向连接
     pub fn get_connection_for_service(&self, service_name: &str) -> Option<ReverseConnection> {
-        self.connections_by_service
+        // 首先尝试精确匹配
+        if let Some(conn) = self.connections_by_service
             .get(service_name)
             .filter(|conn| conn.is_active)
-            .map(|conn| conn.clone())
+        {
+            return Some(conn.clone());
+        }
+
+        // 如果精确匹配失败，尝试层级服务名称查找
+        self.find_connection_by_hierarchical_name(service_name)
+    }
+
+    // 通过层级服务名称查找连接（支持 parent.child -> parent 的映射）
+    fn find_connection_by_hierarchical_name(&self, service_name: &str) -> Option<ReverseConnection> {
+        // 将服务名按 '.' 分割，从最长的父级开始尝试
+        let parts: Vec<&str> = service_name.split('.').collect();
+        
+        // 从完整名称开始，逐步减少层级，直到找到匹配的服务
+        for i in (1..parts.len()).rev() {
+            let parent_name = parts[0..i].join(".");
+            
+            tracing::debug!(
+                requested_service = %service_name,
+                trying_parent = %parent_name,
+                "Attempting hierarchical service name lookup"
+            );
+            
+            if let Some(conn) = self.connections_by_service
+                .get(&parent_name)
+                .filter(|conn| conn.is_active)
+            {
+                tracing::info!(
+                    requested_service = %service_name,
+                    matched_service = %parent_name,
+                    "Found connection using hierarchical service name lookup"
+                );
+                return Some(conn.clone());
+            }
+        }
+
+        tracing::debug!(
+            service_name = %service_name,
+            "No connection found for service using hierarchical lookup"
+        );
+        None
     }
 
     // 发送请求到微服务并等待响应
