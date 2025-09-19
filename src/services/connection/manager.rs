@@ -37,6 +37,31 @@ impl Default for ReverseConnectionManager {
 }
 
 impl ReverseConnectionManager {
+    // 检查是否为有效的UUID格式连接ID
+    fn is_valid_connection_id(id: &str) -> bool {
+        // UUID格式：xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+        if id.len() != 36 {
+            return false;
+        }
+        
+        let parts: Vec<&str> = id.split('-').collect();
+        if parts.len() != 5 {
+            return false;
+        }
+        
+        let expected_lengths = [8, 4, 4, 4, 12];
+        for (i, part) in parts.iter().enumerate() {
+            if part.len() != expected_lengths[i] {
+                return false;
+            }
+            if !part.chars().all(|c| c.is_ascii_hexdigit()) {
+                return false;
+            }
+        }
+        
+        true
+    }
+
     pub fn new(config: ReverseConnectionConfig, service_registry: Option<ServiceRegistry>) -> Self {
         let manager = Self {
             connections_by_service: Arc::new(DashMap::new()),
@@ -118,21 +143,78 @@ impl ReverseConnectionManager {
 
     // 更新心跳
     pub async fn update_heartbeat(&self, connection_id: &str) {
+        // 检查连接ID格式并记录诊断信息
+        let is_valid_uuid = Self::is_valid_connection_id(connection_id);
+        let is_empty = connection_id.is_empty();
+        
+        // 首先尝试按连接ID查找
         if let Some(mut connection) = self.connections_by_id.get_mut(connection_id) {
             connection.update_heartbeat();
             
+            tracing::debug!(
+                connection_id = %connection_id,
+                services = ?connection.services,
+                "Updated heartbeat for reverse connection"
+            );
+            
             // 同时更新服务注册表中对应服务的心跳时间戳
-            if let Some(ref service_registry) = self.service_registry {
-                let now = std::time::SystemTime::now();
-                for service_name in &connection.services {
-                    if let Some(mut service_info) = service_registry.get_mut(service_name) {
-                        service_info.last_heartbeat = now;
-                        tracing::debug!(
-                            connection_id = %connection_id,
-                            service_name = %service_name,
-                            "Updated service heartbeat in registry"
-                        );
-                    }
+            self.update_service_registry_heartbeat(&connection.services).await;
+            return;
+        }
+        
+        // 如果按连接ID找不到，尝试按服务名查找（兼容错误的客户端）
+        if let Some(connection_ref) = self.connections_by_service.get(connection_id) {
+            let actual_connection_id = connection_ref.connection_id.clone();
+            drop(connection_ref); // 释放读锁
+            
+            if let Some(mut connection) = self.connections_by_id.get_mut(&actual_connection_id) {
+                connection.update_heartbeat();
+                
+                tracing::warn!(
+                    received_id = %connection_id,
+                    actual_connection_id = %actual_connection_id,
+                    services = ?connection.services,
+                    is_valid_uuid = %is_valid_uuid,
+                    "COMPATIBILITY FIX: Updated heartbeat using service name fallback - CLIENT SHOULD USE ACTUAL CONNECTION_ID"
+                );
+                
+                // 同时更新服务注册表中对应服务的心跳时间戳
+                self.update_service_registry_heartbeat(&connection.services).await;
+                return;
+            }
+        }
+        
+        // 提供详细的错误诊断
+        if is_empty {
+            tracing::error!(
+                connection_id = %connection_id,
+                "Received heartbeat with EMPTY connection_id - client must provide valid UUID from gateway"
+            );
+        } else if !is_valid_uuid {
+            tracing::error!(
+                connection_id = %connection_id,
+                is_valid_uuid = %is_valid_uuid,
+                "Received heartbeat with INVALID connection_id format - client must use UUID from gateway, not service name"
+            );
+        } else {
+            tracing::warn!(
+                connection_id = %connection_id,
+                "Received heartbeat for unknown connection_id (valid UUID format but connection not found)"
+            );
+        }
+    }
+
+    // 辅助方法：更新服务注册表中的心跳时间戳
+    async fn update_service_registry_heartbeat(&self, services: &[String]) {
+        if let Some(ref service_registry) = self.service_registry {
+            let now = std::time::SystemTime::now();
+            for service_name in services {
+                if let Some(mut service_info) = service_registry.get_mut(service_name) {
+                    service_info.last_heartbeat = now;
+                    tracing::debug!(
+                        service_name = %service_name,
+                        "Updated service heartbeat in registry"
+                    );
                 }
             }
         }

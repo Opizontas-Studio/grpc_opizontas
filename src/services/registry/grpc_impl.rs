@@ -201,6 +201,10 @@ impl MyRegistryService {
                 false
             }
             MessageType::Heartbeat(heartbeat) => {
+                tracing::debug!(
+                    heartbeat_connection_id = %heartbeat.connection_id,
+                    "Received heartbeat message"
+                );
                 reverse_manager.update_heartbeat(&heartbeat.connection_id).await;
                 false
             }
