@@ -120,6 +120,21 @@ impl ReverseConnectionManager {
     pub async fn update_heartbeat(&self, connection_id: &str) {
         if let Some(mut connection) = self.connections_by_id.get_mut(connection_id) {
             connection.update_heartbeat();
+            
+            // 同时更新服务注册表中对应服务的心跳时间戳
+            if let Some(ref service_registry) = self.service_registry {
+                let now = std::time::SystemTime::now();
+                for service_name in &connection.services {
+                    if let Some(mut service_info) = service_registry.get_mut(service_name) {
+                        service_info.last_heartbeat = now;
+                        tracing::debug!(
+                            connection_id = %connection_id,
+                            service_name = %service_name,
+                            "Updated service heartbeat in registry"
+                        );
+                    }
+                }
+            }
         }
     }
 
