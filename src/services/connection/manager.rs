@@ -79,7 +79,7 @@ impl ReverseConnectionManager {
         manager
     }
 
-    // 注册新的反向连接
+    // 注册新的反向连接 - 自动处理旧连接替换
     pub async fn register_connection(
         &self,
         connection_id: String,
@@ -87,7 +87,7 @@ impl ReverseConnectionManager {
         request_sender: mpsc::UnboundedSender<ConnectionMessage>,
     ) -> Result<(), String> {
         let now = Instant::now();
-        let connection = ReverseConnection {
+        let new_connection = ReverseConnection {
             connection_id: connection_id.clone(),
             services: services.clone(),
             created_at: now,
@@ -96,22 +96,82 @@ impl ReverseConnectionManager {
             request_sender,
         };
 
-        // 按连接ID存储
-        self.connections_by_id
-            .insert(connection_id.clone(), connection.clone());
+        // 首先收集需要清理的旧连接
+        let mut old_connections_to_cleanup = Vec::new();
+        
+        // 原子性地处理服务映射，替换旧连接
+        for service in &services {
+            // 使用 entry API 原子性地替换旧连接
+            if let Some(old_connection) = self.connections_by_service.insert(service.clone(), new_connection.clone()) {
+                // 如果旧连接的ID不同，需要清理
+                if old_connection.connection_id != connection_id {
+                    old_connections_to_cleanup.push(old_connection.clone());
+                    tracing::info!(
+                        service_name = %service,
+                        new_connection_id = %connection_id,
+                        old_connection_id = %old_connection.connection_id,
+                        "REPLACED: Service mapping updated from old to new connection"
+                    );
+                } else {
+                    tracing::debug!(
+                        service_name = %service,
+                        connection_id = %connection_id,
+                        "Service mapping updated for same connection (reconnection)"
+                    );
+                }
+            } else {
+                tracing::info!(
+                    service_name = %service,
+                    connection_id = %connection_id,
+                    "NEW: Registered reverse connection for service"
+                );
+            }
+        }
 
-        // 按服务名存储
-        for service in services {
-            tracing::info!(
-                service_name = %service,
-                connection_id = %connection_id,
-                "Registered reverse connection for service"
-            );
-            self.connections_by_service
-                .insert(service, connection.clone());
+        // 按连接ID存储新连接
+        self.connections_by_id.insert(connection_id.clone(), new_connection);
+
+        // 清理被替换的旧连接
+        for old_connection in old_connections_to_cleanup {
+            self.cleanup_replaced_connection(&old_connection.connection_id).await;
         }
 
         Ok(())
+    }
+
+    // 清理被替换的连接
+    async fn cleanup_replaced_connection(&self, old_connection_id: &str) {
+        if let Some((_, old_connection)) = self.connections_by_id.remove(old_connection_id) {
+            // 从服务映射中移除旧连接（只移除指向这个旧连接的映射）
+            for service in &old_connection.services {
+                // 检查当前服务映射是否仍指向旧连接
+                if let Some(current_connection) = self.connections_by_service.get(service) {
+                    if current_connection.connection_id == *old_connection_id {
+                        // 这是一个孤立的映射，移除它
+                        self.connections_by_service.remove(service);
+                    }
+                }
+            }
+
+            // 同时从主服务注册表中移除该服务，确保状态同步
+            if let Some(ref service_registry) = self.service_registry {
+                for service in &old_connection.services {
+                    if service_registry.remove(service).is_some() {
+                        tracing::info!(
+                            service_name = %service,
+                            old_connection_id = %old_connection_id,
+                            "CLEANUP: Removed replaced service from main registry"
+                        );
+                    }
+                }
+            }
+
+            tracing::info!(
+                old_connection_id = %old_connection_id,
+                services = ?old_connection.services,
+                "Cleaned up replaced reverse connection"
+            );
+        }
     }
 
     // 注销反向连接
@@ -149,16 +209,30 @@ impl ReverseConnectionManager {
         
         // 首先尝试按连接ID查找
         if let Some(mut connection) = self.connections_by_id.get_mut(connection_id) {
+            let now = std::time::Instant::now();
+            let old_heartbeat = connection.last_heartbeat;
             connection.update_heartbeat();
+            let services = connection.services.clone();
+            
+            // 重要：同时更新 connections_by_service 中的副本
+            for service_name in &services {
+                if let Some(mut service_connection) = self.connections_by_service.get_mut(service_name) {
+                    if service_connection.connection_id == connection_id {
+                        service_connection.last_heartbeat = now;
+                    }
+                }
+            }
             
             tracing::debug!(
                 connection_id = %connection_id,
-                services = ?connection.services,
-                "Updated heartbeat for reverse connection"
+                services = ?services,
+                old_heartbeat_elapsed_ms = %old_heartbeat.elapsed().as_millis(),
+                new_heartbeat_set = %now.elapsed().as_millis(),
+                "Updated heartbeat for reverse connection in both mappings"
             );
             
             // 同时更新服务注册表中对应服务的心跳时间戳
-            self.update_service_registry_heartbeat(&connection.services).await;
+            self.update_service_registry_heartbeat(&services).await;
             return;
         }
         
@@ -168,38 +242,58 @@ impl ReverseConnectionManager {
             drop(connection_ref); // 释放读锁
             
             if let Some(mut connection) = self.connections_by_id.get_mut(&actual_connection_id) {
+                let now = std::time::Instant::now();
+                let old_heartbeat = connection.last_heartbeat;
                 connection.update_heartbeat();
+                let services = connection.services.clone();
                 
-                tracing::warn!(
+                // 重要：同时更新 connections_by_service 中的副本
+                for service_name in &services {
+                    if let Some(mut service_connection) = self.connections_by_service.get_mut(service_name) {
+                        if service_connection.connection_id == actual_connection_id {
+                            service_connection.last_heartbeat = now;
+                        }
+                    }
+                }
+                
+                tracing::error!(
                     received_id = %connection_id,
                     actual_connection_id = %actual_connection_id,
-                    services = ?connection.services,
+                    services = ?services,
                     is_valid_uuid = %is_valid_uuid,
-                    "COMPATIBILITY FIX: Updated heartbeat using service name fallback - CLIENT SHOULD USE ACTUAL CONNECTION_ID"
+                    old_heartbeat_elapsed_ms = %old_heartbeat.elapsed().as_millis(),
+                    new_heartbeat_set = %now.elapsed().as_millis(),
+                    "CLIENT ERROR: Using service name as heartbeat ID! Client must use connection_id: '{}' for heartbeat, not service name: '{}'. Heartbeat updated in both mappings.",
+                    actual_connection_id, connection_id
                 );
                 
                 // 同时更新服务注册表中对应服务的心跳时间戳
-                self.update_service_registry_heartbeat(&connection.services).await;
+                self.update_service_registry_heartbeat(&services).await;
                 return;
             }
         }
         
-        // 提供详细的错误诊断
+        // 提供详细的错误诊断和客户端指导
         if is_empty {
             tracing::error!(
                 connection_id = %connection_id,
-                "Received heartbeat with EMPTY connection_id - client must provide valid UUID from gateway"
+                "CLIENT ERROR: Empty connection_id in heartbeat! \n\
+                 SOLUTION: Client must save and use the connection_id returned by EstablishReverseConnection"
             );
         } else if !is_valid_uuid {
             tracing::error!(
                 connection_id = %connection_id,
                 is_valid_uuid = %is_valid_uuid,
-                "Received heartbeat with INVALID connection_id format - client must use UUID from gateway, not service name"
+                "CLIENT ERROR: Invalid connection_id format in heartbeat! \n\
+                 RECEIVED: '{}' (appears to be service name) \n\
+                 SOLUTION: Use the UUID connection_id returned by EstablishReverseConnection, not service name",
+                connection_id
             );
         } else {
             tracing::warn!(
                 connection_id = %connection_id,
-                "Received heartbeat for unknown connection_id (valid UUID format but connection not found)"
+                "CONNECTION NOT FOUND: Valid UUID format but connection expired or not found \n\
+                 SOLUTION: Client should re-establish connection and use new connection_id"
             );
         }
     }
@@ -220,18 +314,64 @@ impl ReverseConnectionManager {
         }
     }
 
-    // 获取服务的反向连接
+    // 获取服务的反向连接 - 增强状态验证和诊断
     pub fn get_connection_for_service(&self, service_name: &str) -> Option<ReverseConnection> {
-        // 首先尝试精确匹配
-        if let Some(conn) = self.connections_by_service
-            .get(service_name)
-            .filter(|conn| conn.is_active)
-        {
-            return Some(conn.clone());
+        // 首先尝试精确匹配，并记录详细诊断信息
+        if let Some(conn_ref) = self.connections_by_service.get(service_name) {
+            let conn = conn_ref.clone();
+            let is_active = conn.is_active;
+            let is_expired = conn.is_expired(self.config.heartbeat_timeout);
+            let last_heartbeat_ago = conn.last_heartbeat.elapsed();
+            
+            tracing::debug!(
+                service_name = %service_name,
+                connection_id = %conn.connection_id,
+                is_active = %is_active,
+                is_expired = %is_expired,
+                last_heartbeat_ago_ms = %last_heartbeat_ago.as_millis(),
+                heartbeat_timeout_ms = %self.config.heartbeat_timeout.as_millis(),
+                "Found service connection, checking validity"
+            );
+            
+            if is_active && !is_expired {
+                return Some(conn);
+            } else {
+                tracing::warn!(
+                    service_name = %service_name,
+                    connection_id = %conn.connection_id,
+                    is_active = %is_active,
+                    is_expired = %is_expired,
+                    "Service connection found but invalid, trying hierarchical lookup"
+                );
+            }
+        } else {
+            tracing::debug!(
+                service_name = %service_name,
+                "No direct service mapping found, trying hierarchical lookup"
+            );
         }
 
         // 如果精确匹配失败，尝试层级服务名称查找
-        self.find_connection_by_hierarchical_name(service_name)
+        let result = self.find_connection_by_hierarchical_name(service_name);
+        
+        // 如果找不到有效的反向连接，主动清理孤立的服务注册条目
+        if result.is_none() {
+            self.cleanup_orphaned_service_registry_entry(service_name);
+        }
+        
+        result
+    }
+
+    // 清理孤立的服务注册表条目（没有对应反向连接的服务）
+    fn cleanup_orphaned_service_registry_entry(&self, service_name: &str) {
+        if let Some(ref service_registry) = self.service_registry {
+            if service_registry.remove(service_name).is_some() {
+                tracing::warn!(
+                    service_name = %service_name,
+                    "CONSISTENCY FIX: Removed orphaned service from registry (no valid reverse connection)"
+                );
+            }
+        }
     }
 
     // 通过层级服务名称查找连接（支持 parent.child -> parent 的映射）
@@ -251,7 +391,7 @@ impl ReverseConnectionManager {
             
             if let Some(conn) = self.connections_by_service
                 .get(&parent_name)
-                .filter(|conn| conn.is_active)
+                .filter(|conn| conn.is_active && !conn.is_expired(self.config.heartbeat_timeout))
             {
                 tracing::info!(
                     requested_service = %service_name,

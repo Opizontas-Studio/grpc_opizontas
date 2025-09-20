@@ -114,12 +114,15 @@ impl RegistryService for MyRegistryService {
             return Err(Status::internal("Failed to register connection"));
         }
 
-        // 发送连接确认
+        // 发送连接确认 - 明确指导客户端使用连接ID
         let status_msg = ConnectionMessage {
             message_type: Some(MessageType::Status(ConnectionStatus {
                 connection_id: connection_id.clone(),
                 status: StatusType::Connected as i32,
-                message: "Connection established".to_string(),
+                message: format!(
+                    "Connection established. IMPORTANT: Use connection_id '{}' for ALL heartbeat messages, not service names", 
+                    connection_id
+                ),
             })),
         };
 
