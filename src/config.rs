@@ -2,12 +2,15 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::time::Duration;
 
+use crate::services::event::EventConfig;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub security: SecurityConfig,
     pub router: RouterConfig,
     pub connection_pool: ConnectionPoolConfig,
     pub reverse_connection: ReverseConnectionConfig,
+    pub event: EventConfig,
     pub server: ServerConfig,
 }
 
@@ -204,6 +207,7 @@ impl Default for Config {
                 cleanup_interval: 60,
                 max_pending_requests: 1000,
             },
+            event: EventConfig::default(),
             server: ServerConfig {
                 address: "0.0.0.0:50051".to_string(),
                 log_level: "info".to_string(),

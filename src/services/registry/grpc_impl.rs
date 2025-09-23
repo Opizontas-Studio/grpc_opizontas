@@ -189,6 +189,7 @@ impl MyRegistryService {
             }
 
             reverse_manager.unregister_connection(&connection_id).await;
+            reverse_manager.cleanup_connection_subscriptions(&connection_id).await;
             tracing::info!(connection_id = %connection_id, "Reverse connection closed");
         });
     }
@@ -231,6 +232,43 @@ impl MyRegistryService {
             }
             MessageType::Register(_) => {
                 tracing::warn!("Unexpected register message in established connection");
+                false
+            }
+            MessageType::Event(event) => {
+                // 处理事件发布
+                tracing::debug!(
+                    event_type = %event.event_type,
+                    event_id = %event.event_id,
+                    "Received event message for publishing"
+                );
+                
+                tokio::spawn({
+                    let reverse_manager = (*reverse_manager).clone();
+                    async move {
+                        if let Err(err) = reverse_manager.handle_event_message(event).await {
+                            tracing::error!(error = %err, "Failed to handle event message");
+                        }
+                    }
+                });
+                false
+            }
+            MessageType::Subscription(subscription) => {
+                // 处理订阅请求
+                tracing::debug!(
+                    subscriber_id = %subscription.subscriber_id,
+                    event_types = ?subscription.event_types,
+                    action = ?subscription.action(),
+                    "Received subscription request"
+                );
+                
+                tokio::spawn({
+                    let reverse_manager = (*reverse_manager).clone();
+                    async move {
+                        if let Err(err) = reverse_manager.handle_subscription_request(subscription).await {
+                            tracing::error!(error = %err, "Failed to handle subscription request");
+                        }
+                    }
+                });
                 false
             }
         }

@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::registry::{ConnectionMessage, ForwardRequest, ForwardResponse};
 use crate::services::registry::types::ServiceRegistry;
+use crate::services::event::{EventBus, EventConfig};
 
 use super::{
     connection::ReverseConnection,
@@ -26,13 +27,15 @@ pub struct ReverseConnectionManager {
     streaming_handlers: Arc<RwLock<DashMap<String, StreamingResponseHandler>>>,
     // 主服务注册表的引用，用于同步清理
     service_registry: Option<ServiceRegistry>,
+    // 事件总线
+    pub event_bus: Arc<EventBus>,
     config: ReverseConnectionConfig,
     task_tracker: Arc<TaskTracker>,
 }
 
 impl Default for ReverseConnectionManager {
     fn default() -> Self {
-        Self::new(ReverseConnectionConfig::default(), None)
+        Self::new(ReverseConnectionConfig::default(), None, EventConfig::default())
     }
 }
 
@@ -62,13 +65,18 @@ impl ReverseConnectionManager {
         true
     }
 
-    pub fn new(config: ReverseConnectionConfig, service_registry: Option<ServiceRegistry>) -> Self {
+    pub fn new(
+        config: ReverseConnectionConfig, 
+        service_registry: Option<ServiceRegistry>,
+        event_config: EventConfig,
+    ) -> Self {
         let manager = Self {
             connections_by_service: Arc::new(DashMap::new()),
             connections_by_id: Arc::new(DashMap::new()),
             pending_requests: Arc::new(RwLock::new(DashMap::new())),
             streaming_handlers: Arc::new(RwLock::new(DashMap::new())),
             service_registry,
+            event_bus: Arc::new(EventBus::new(event_config)),
             config: config.clone(),
             task_tracker: Arc::new(TaskTracker::new()),
         };
@@ -685,6 +693,63 @@ impl ReverseConnectionManager {
             active_connections: self.connections_by_id.len(),
             registered_services: self.connections_by_service.len(),
         }
+    }
+
+    // 处理事件消息
+    pub async fn handle_event_message(
+        &self,
+        event: crate::registry::EventMessage,
+    ) -> Result<usize, String> {
+        match self.event_bus.publish_event(event).await {
+            Ok(subscriber_count) => Ok(subscriber_count),
+            Err(err) => {
+                tracing::warn!(error = %err, "Failed to publish event");
+                Err(format!("Failed to publish event: {}", err))
+            }
+        }
+    }
+
+    // 处理订阅请求
+    pub async fn handle_subscription_request(
+        &self,
+        subscription: crate::registry::SubscriptionRequest,
+    ) -> Result<(), String> {
+        match self.event_bus.handle_subscription_request(subscription).await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                tracing::warn!(error = %err, "Failed to handle subscription request");
+                Err(format!("Failed to handle subscription: {}", err))
+            }
+        }
+    }
+
+    // 为连接创建事件流
+    pub fn create_event_stream_for_connection(
+        &self,
+        connection_id: &str,
+        event_type: &str,
+    ) -> Result<impl tokio_stream::Stream<Item = Result<crate::registry::EventMessage, tonic::Status>>, String> {
+        match self.event_bus.subscribe_event_type(event_type, connection_id) {
+            Ok(stream) => Ok(stream),
+            Err(err) => {
+                tracing::warn!(
+                    connection_id = %connection_id,
+                    event_type = %event_type,
+                    error = %err,
+                    "Failed to create event stream"
+                );
+                Err(format!("Failed to create event stream: {}", err))
+            }
+        }
+    }
+
+    // 清理连接的所有订阅
+    pub async fn cleanup_connection_subscriptions(&self, connection_id: &str) {
+        self.event_bus.remove_subscriber(connection_id).await;
+        tracing::debug!(
+            connection_id = %connection_id,
+            "Cleaned up event subscriptions for connection"
+        );
     }
 
     // 启动清理任务

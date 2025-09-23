@@ -38,6 +38,10 @@ message ConnectionMessage {
     Heartbeat heartbeat = 4;
     // 连接状态消息
     ConnectionStatus status = 5;
+    // 事件消息
+    EventMessage event = 6;
+    // 订阅请求消息
+    SubscriptionRequest subscription = 7;
   }
 }
 
@@ -146,4 +150,36 @@ message ConnectionStatus {
   StatusType status = 2;
   // 可选的状态消息
   string message = 3;
+}
+
+// 事件消息
+message EventMessage {
+  // 事件唯一标识符
+  string event_id = 1;
+  // 事件类型 (例如: "user.login", "order.created")
+  string event_type = 2;
+  // 发布者连接ID
+  string publisher_id = 3;
+  // 事件数据 (protobuf 编码的字节)
+  bytes payload = 4;
+  // 发布时间戳 (Unix 时间戳)
+  int64 timestamp = 5;
+  // 事件元数据
+  map<string, string> metadata = 6;
+}
+
+// 订阅请求消息
+message SubscriptionRequest {
+  // 操作类型
+  enum Action {
+    // 订阅事件
+    SUBSCRIBE = 0;
+    // 取消订阅事件
+    UNSUBSCRIBE = 1;
+  }
+  Action action = 1;
+  // 要订阅/取消订阅的事件类型列表
+  repeated string event_types = 2;
+  // 订阅者连接ID
+  string subscriber_id = 3;
 }

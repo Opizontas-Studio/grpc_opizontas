@@ -25,11 +25,16 @@ impl MyRegistryService {
         };
 
         let registry = Arc::new(dashmap::DashMap::new());
+        let event_config = config.event.clone();
         
         let service = Self {
             registry: registry.clone(),
             config,
-            reverse_connection_manager: Arc::new(ReverseConnectionManager::new(reverse_config, Some(registry))),
+            reverse_connection_manager: Arc::new(ReverseConnectionManager::new(
+                reverse_config, 
+                Some(registry),
+                event_config
+            )),
         };
 
         // 启动定期清理任务
