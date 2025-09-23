@@ -252,6 +252,39 @@ impl GatewayClient {
         let services = self.list_healthy_services().await?;
         Ok(services.contains_key(service_name))
     }
+
+    /// 发送连接消息 - 为事件系统提供支持
+    pub async fn send_connection_message(
+        &mut self,
+        message: crate::registry::ConnectionMessage,
+    ) -> Result<(), GatewayClientError> {
+        // 创建单次消息流
+        let request_stream = tokio_stream::once(message);
+        
+        // 建立连接并发送消息
+        let response = self.client.establish_connection(request_stream).await?;
+        let mut inbound = response.into_inner();
+        
+        // 对于事件消息，我们通常不需要等待响应，但要确保消息发送成功
+        // 这里简单检查连接是否建立成功
+        if let Some(result) = inbound.next().await {
+            match result {
+                Ok(_) => {
+                    tracing::debug!("Connection message sent successfully");
+                    Ok(())
+                },
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to send connection message");
+                    Err(GatewayClientError::Grpc(e))
+                }
+            }
+        } else {
+            // 如果没有收到任何响应，说明消息可能已经发送成功
+            // 这在事件发布场景中是正常的
+            tracing::debug!("Connection message sent, no response expected");
+            Ok(())
+        }
+    }
 }
 
 /// 辅助宏：简化服务调用

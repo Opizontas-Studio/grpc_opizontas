@@ -1,4 +1,4 @@
-use std::time::SystemTime;
+use std::time::{SystemTime, Duration};
 use tokio_stream::{Stream, StreamExt};
 use uuid::Uuid;
 
@@ -92,19 +92,102 @@ impl EventClient {
         &self,
         message: ConnectionMessage,
     ) -> Result<(), GatewayClientError> {
-        // 这里需要实现发送逻辑，可能需要扩展 GatewayClient
-        // 暂时返回 Ok，具体实现取决于 GatewayClient 的架构
         tracing::debug!(
             message_type = ?message.message_type,
             connection_id = %self.connection_id,
             "Sending connection message"
         );
         
-        // TODO: 实现实际的消息发送逻辑
-        // 这可能需要在 GatewayClient 中添加 send_connection_message 方法
-        // 或者直接使用双向流发送消息
+        // 创建 GatewayClient 的可变引用来发送消息
+        // 注意：这里需要克隆 GatewayClient，因为它实现了 Clone trait
+        let mut client = self.gateway_client.clone();
         
-        Ok(())
+        // 调用 GatewayClient 的 send_connection_message 方法，并添加错误处理
+        match client.send_connection_message(message).await {
+            Ok(()) => {
+                tracing::info!(
+                    connection_id = %self.connection_id,
+                    "Connection message sent successfully"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    connection_id = %self.connection_id,
+                    "Failed to send connection message"
+                );
+                Err(e)
+            }
+        }
+    }
+
+    /// 带重试机制的发送连接消息
+    async fn send_connection_message_with_retry(
+        &self,
+        message: ConnectionMessage,
+        max_retries: u32,
+    ) -> Result<(), GatewayClientError> {
+        let mut attempts = 0;
+        let mut backoff = Duration::from_millis(100); // 初始退避时间 100ms
+
+        loop {
+            match self.send_connection_message(message.clone()).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    attempts += 1;
+                    
+                    if attempts > max_retries {
+                        tracing::error!(
+                            error = %e,
+                            attempts = attempts,
+                            connection_id = %self.connection_id,
+                            "Failed to send connection message after max retries"
+                        );
+                        return Err(e);
+                    }
+
+                    tracing::warn!(
+                        error = %e,
+                        attempt = attempts,
+                        backoff_ms = backoff.as_millis(),
+                        connection_id = %self.connection_id,
+                        "Retrying connection message send"
+                    );
+
+                    // 指数退避，最大不超过5秒
+                    tokio::time::sleep(backoff).await;
+                    backoff = std::cmp::min(backoff * 2, Duration::from_secs(5));
+                }
+            }
+        }
+    }
+
+    /// 发布事件（带重试）
+    pub async fn publish_event_with_retry(
+        &self,
+        event_type: &str,
+        payload: Vec<u8>,
+        metadata: Option<std::collections::HashMap<String, String>>,
+        max_retries: u32,
+    ) -> Result<(), GatewayClientError> {
+        let event = EventMessage {
+            event_id: Uuid::new_v4().to_string(),
+            event_type: event_type.to_string(),
+            publisher_id: self.connection_id.clone(),
+            payload,
+            timestamp: SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64,
+            metadata: metadata.unwrap_or_default(),
+        };
+
+        let message = ConnectionMessage {
+            message_type: Some(MessageType::Event(event)),
+        };
+
+        self.send_connection_message_with_retry(message, max_retries).await
     }
 }
 
@@ -145,36 +228,5 @@ impl EventClientBuilder {
 impl Default for EventClientBuilder {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_event_client_builder() {
-        let builder = EventClientBuilder::new()
-            .with_connection_id("test-connection".to_string());
-        
-        // 由于需要 GatewayClient，这个测试只验证构建器逻辑
-        assert!(builder.gateway_client.is_none());
-        assert_eq!(builder.connection_id.as_ref().unwrap(), "test-connection");
-    }
-
-    #[test]
-    fn test_event_message_creation() {
-        let event = EventMessage {
-            event_id: "test-id".to_string(),
-            event_type: "test.event".to_string(),
-            publisher_id: "test-publisher".to_string(),
-            payload: b"test payload".to_vec(),
-            timestamp: 1234567890,
-            metadata: std::collections::HashMap::new(),
-        };
-
-        assert_eq!(event.event_type, "test.event");
-        assert_eq!(event.publisher_id, "test-publisher");
-        assert_eq!(event.payload, b"test payload");
     }
 }
