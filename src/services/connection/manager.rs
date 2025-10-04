@@ -479,10 +479,19 @@ impl ReverseConnectionManager {
         // 获取连接
         let connection = self
             .get_connection_for_service(service_name)
-            .ok_or_else(|| format!("No reverse connection found for service: {service_name}"))?;
+            .ok_or_else(|| {
+                tracing::error!(
+                    service_name = %service_name,
+                    method_path = %method_path,
+                    request_id = %request_id,
+                    "No reverse connection found for service"
+                );
+                format!("No reverse connection found for service: {service_name}")
+            })?;
 
         // 使用传入的请求ID
         let request_id = request_id.to_string();
+        let payload_size = payload.len();
 
         // 创建响应通道
         let (response_sender, response_receiver) = tokio::sync::oneshot::channel();
@@ -523,28 +532,73 @@ impl ReverseConnectionManager {
                 forward_request,
             )),
         };
+        
+        tracing::debug!(
+            service_name = %service_name,
+            method_path = %method_path,
+            request_id = %request_id,
+            connection_id = %connection.connection_id,
+            payload_size = payload_size,
+            "Sending request via reverse connection"
+        );
 
         // 发送请求到微服务
         if connection.request_sender.send(message).is_err() {
             // 移除等待中的请求
             let pending_requests = self.pending_requests.read().await;
             pending_requests.remove(&request_id);
+            
+            tracing::error!(
+                service_name = %service_name,
+                method_path = %method_path,
+                request_id = %request_id,
+                connection_id = %connection.connection_id,
+                "Failed to send request to microservice - connection channel closed"
+            );
+            
             return Err("Failed to send request to microservice".to_string());
         }
 
         // 等待响应（带超时）
         match tokio::time::timeout(self.config.request_timeout, response_receiver).await {
-            Ok(Ok(response)) => Ok(response),
+            Ok(Ok(response)) => {
+                tracing::debug!(
+                    service_name = %service_name,
+                    method_path = %method_path,
+                    request_id = %request_id,
+                    status_code = response.status_code,
+                    response_size = response.payload.len(),
+                    "Received response via reverse connection"
+                );
+                Ok(response)
+            },
             Ok(Err(_)) => {
                 // 移除等待中的请求
                 let pending_requests = self.pending_requests.read().await;
                 pending_requests.remove(&request_id);
+                
+                tracing::error!(
+                    service_name = %service_name,
+                    method_path = %method_path,
+                    request_id = %request_id,
+                    "Response channel closed - microservice disconnected unexpectedly"
+                );
+                
                 Err("Response channel closed".to_string())
             }
             Err(_) => {
                 // 移除等待中的请求
                 let pending_requests = self.pending_requests.read().await;
                 pending_requests.remove(&request_id);
+                
+                tracing::error!(
+                    service_name = %service_name,
+                    method_path = %method_path,
+                    request_id = %request_id,
+                    timeout_ms = self.config.request_timeout.as_millis(),
+                    "Request timeout - microservice did not respond in time"
+                );
+                
                 Err("Request timeout".to_string())
             }
         }

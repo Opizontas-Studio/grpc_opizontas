@@ -156,7 +156,11 @@ where
             // 检查是否有反向连接可用
             if reverse_manager.has_reverse_connection(&service_name) {
                 // 使用反向连接转发请求
-                tracing::debug!(service_name = %service_name, "Using reverse connection for request");
+                tracing::info!(
+                    service_name = %service_name,
+                    path = %path,
+                    "Using reverse connection for request forwarding"
+                );
 
                 match Self::forward_via_reverse_connection(
                     &reverse_manager,
@@ -166,9 +170,22 @@ where
                 )
                 .await
                 {
-                    Ok(response) => Ok(response),
+                    Ok(response) => {
+                        tracing::debug!(
+                            service_name = %service_name,
+                            path = %path,
+                            status = %response.status(),
+                            "Request forwarded successfully via reverse connection"
+                        );
+                        Ok(response)
+                    },
                     Err(e) => {
-                        tracing::error!(error = %e, "Failed to forward via reverse connection");
+                        tracing::error!(
+                            service_name = %service_name,
+                            path = %path,
+                            error = %e,
+                            "Failed to forward request via reverse connection"
+                        );
                         Ok(response::create_error_response(
                             &RouterError::ForwardingError(e),
                         ))
@@ -190,18 +207,44 @@ where
 
                 match target_addr {
                     Some(ref addr) => {
+                        tracing::info!(
+                            service_name = %service_name,
+                            target_addr = %addr,
+                            path = %path,
+                            "Forwarding request to healthy service instance"
+                        );
+                        
                         // 转发请求到目标服务
                         match forwarder::forward_request(&client_manager, &config, req, addr).await
                         {
-                            Ok(response) => Ok(response),
+                            Ok(response) => {
+                                tracing::debug!(
+                                    service_name = %service_name,
+                                    target_addr = %addr,
+                                    status = %response.status(),
+                                    "Request forwarded successfully"
+                                );
+                                Ok(response)
+                            },
                             Err(e) => {
-                                tracing::error!(error = %e, "Failed to forward request");
+                                tracing::error!(
+                                    service_name = %service_name,
+                                    target_addr = %addr,
+                                    path = %path,
+                                    error = %e,
+                                    "Failed to forward request to target service"
+                                );
                                 Ok(response::create_error_response(&e))
                             }
                         }
                     }
                     None => {
                         // 服务未注册
+                        tracing::warn!(
+                            service_name = %service_name,
+                            path = %path,
+                            "Service not found or no healthy instances available in registry"
+                        );
                         let error = RouterError::ServiceNotFound(format!(
                             "Service '{service_name}' not found in registry"
                         ));

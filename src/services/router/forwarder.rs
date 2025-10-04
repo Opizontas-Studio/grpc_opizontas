@@ -24,11 +24,29 @@ where
     B: Body<Data = bytes::Bytes> + Send + 'static,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>> + std::fmt::Debug,
 {
+    // 提前提取需要的信息，避免借用冲突
+    let method = req.method().as_str().to_string();
+    let uri = req.uri().to_string();
+    
+    tracing::debug!(
+        target_addr = %target_addr,
+        method = %method,
+        uri = %uri,
+        "Starting request forwarding"
+    );
+
     // 获取或创建客户端连接
     let channel = client_manager
         .get_or_create_client(target_addr)
         .await
-        .map_err(|e| RouterError::ForwardingError(format!("Failed to get client: {e}")))?;
+        .map_err(|e| {
+            tracing::error!(
+                target_addr = %target_addr,
+                error = %e,
+                "Failed to get or create gRPC client connection"
+            );
+            RouterError::ForwardingError(format!("Failed to get client: {e}"))
+        })?;
 
     // 直接构建新的请求，不收集请求体
     let (parts, body) = req.into_parts();
@@ -51,8 +69,26 @@ where
     // 发送请求到目标服务（带超时）
     let response = tokio::time::timeout(config.request_timeout(), channel.clone().oneshot(new_req))
         .await
-        .map_err(|_| RouterError::ForwardingError("Request timeout".to_string()))?
-        .map_err(|e| RouterError::ForwardingError(format!("Failed to forward request: {e}")))?;
+        .map_err(|_| {
+            tracing::error!(
+                target_addr = %target_addr,
+                timeout_ms = config.request_timeout().as_millis(),
+                method = %method,
+                uri = %uri,
+                "Request forwarding timeout"
+            );
+            RouterError::ForwardingError("Request timeout".to_string())
+        })?
+        .map_err(|e| {
+            tracing::error!(
+                target_addr = %target_addr,
+                method = %method,
+                uri = %uri,
+                error = %e,
+                "Failed to forward request to target service"
+            );
+            RouterError::ForwardingError(format!("Failed to forward request: {e}"))
+        })?;
 
     // 直接转换响应体，不收集响应体
     let (parts, body) = response.into_parts();
@@ -71,7 +107,17 @@ where
         body.map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) }),
     );
 
-    response_builder
+    let final_response = response_builder
         .body(boxed_body)
-        .map_err(|e| RouterError::ForwardingError(format!("Failed to build response: {e}")))
+        .map_err(|e| RouterError::ForwardingError(format!("Failed to build response: {e}")))?;
+
+    tracing::debug!(
+        target_addr = %target_addr,
+        method = %method,
+        uri = %uri,
+        status = %final_response.status(),
+        "Successfully forwarded request and received response"
+    );
+
+    Ok(final_response)
 }
