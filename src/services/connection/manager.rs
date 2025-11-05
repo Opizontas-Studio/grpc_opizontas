@@ -222,7 +222,7 @@ impl ReverseConnectionManager {
             connection.update_heartbeat();
             let services = connection.services.clone();
             
-            // 重要：同时更新 connections_by_service 中的副本
+            // 同时更新 connections_by_service 中的副本
             for service_name in &services {
                 if let Some(mut service_connection) = self.connections_by_service.get_mut(service_name) {
                     if service_connection.connection_id == connection_id {
@@ -255,7 +255,7 @@ impl ReverseConnectionManager {
                 connection.update_heartbeat();
                 let services = connection.services.clone();
                 
-                // 重要：同时更新 connections_by_service 中的副本
+                // 同时更新 connections_by_service 中的副本
                 for service_name in &services {
                     if let Some(mut service_connection) = self.connections_by_service.get_mut(service_name) {
                         if service_connection.connection_id == actual_connection_id {
@@ -713,10 +713,7 @@ impl ReverseConnectionManager {
         ForwardResponse {
             request_id,
             status_code: 200,
-            headers: std::collections::HashMap::new(),
             payload: chunk_data,
-            error_message: String::new(),
-            streaming_info: None,
             response_stream_info: Some(crate::registry::ResponseStreamInfo {
                 is_streamed: true,
                 chunk_index,
@@ -724,6 +721,7 @@ impl ReverseConnectionManager {
                 chunk_size,
                 total_size,
             }),
+            ..Default::default()
         }
     }
 
