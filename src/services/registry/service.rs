@@ -1,10 +1,11 @@
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use crate::services::connection::{ReverseConnectionManager, ReverseConnectionConfig};
-use super::types::{ServiceHealthStatus, ServiceInfo, ServiceRegistry};
+use super::types::{ServiceHealthStatus, ServiceInfo, ServiceInstances, ServiceRegistry};
 use crate::config::Config;
+use crate::services::connection::{ReverseConnectionConfig, ReverseConnectionManager};
 
 // 定义的服务实现
 #[derive(Debug)]
@@ -24,16 +25,16 @@ impl MyRegistryService {
             max_pending_requests: config.reverse_connection.max_pending_requests,
         };
 
-        let registry = Arc::new(dashmap::DashMap::new());
+        let registry: ServiceRegistry = Arc::new(DashMap::new());
         let event_config = config.event.clone();
-        
+
         let service = Self {
             registry: registry.clone(),
             config,
             reverse_connection_manager: Arc::new(ReverseConnectionManager::new(
-                reverse_config, 
+                reverse_config,
                 Some(registry),
-                event_config
+                event_config,
             )),
         };
 
@@ -92,93 +93,141 @@ impl MyRegistryService {
         if service_parts.len() < 2 {
             return Err("Invalid service path format".to_string());
         }
-        
+
         // 返回完整的服务名称（包含包名），而不是只返回第一部分
         // 例如：从 "amwaybot.RecommendationService" 返回 "amwaybot.RecommendationService"
         // 而不是只返回 "amwaybot"
         Ok(service_part.to_string())
     }
 
-    // 清理过期的服务
+    // 清理过期的服务实例
     async fn cleanup_expired_services(registry: &ServiceRegistry, timeout: Duration) {
         let now = SystemTime::now();
-        let mut to_remove = Vec::new();
+        let mut expired_instances = Vec::new();
 
-        // 收集需要删除的服务
-        for entry in registry.iter() {
-            let service_name = entry.key();
-            let service_info = entry.value();
+        for service_entry in registry.iter() {
+            let service_name = service_entry.key().clone();
+            let instances = service_entry.value().clone();
 
-            if let Ok(elapsed) = now.duration_since(service_info.last_heartbeat) {
-                if elapsed > timeout {
-                    tracing::warn!(
-                        service_name = %service_name, 
-                        elapsed_secs = elapsed.as_secs(),
-                        timeout_secs = timeout.as_secs(),
-                        "Service expired due to heartbeat timeout, removing from registry"
-                    );
-                    to_remove.push(service_name.clone());
-                } else {
-                    tracing::debug!(
-                        service_name = %service_name, 
-                        last_heartbeat_secs = elapsed.as_secs(),
-                        timeout_secs = timeout.as_secs(),
-                        "Service is healthy"
-                    );
+            for instance_entry in instances.iter() {
+                let instance_id = instance_entry.key().clone();
+                let service_info = instance_entry.value().clone();
+
+                if let Ok(elapsed) = now.duration_since(service_info.last_heartbeat) {
+                    if elapsed > timeout {
+                        tracing::warn!(
+                            service_name = %service_name,
+                            instance_id = %instance_id,
+                            elapsed_secs = elapsed.as_secs(),
+                            timeout_secs = timeout.as_secs(),
+                            "Service instance expired due to heartbeat timeout"
+                        );
+                        expired_instances.push((service_name.clone(), instance_id));
+                    } else {
+                        tracing::debug!(
+                            service_name = %service_name,
+                            instance_id = %instance_id,
+                            last_heartbeat_secs = elapsed.as_secs(),
+                            timeout_secs = timeout.as_secs(),
+                            "Service instance is healthy"
+                        );
+                    }
                 }
             }
         }
 
-        if to_remove.is_empty() {
-        } else {
+        if !expired_instances.is_empty() {
             tracing::info!(
-                expired_count = to_remove.len(),
-                "Cleanup check completed, removing expired services..."
+                expired_count = expired_instances.len(),
+                "Cleanup check completed, removing expired service instances..."
             );
         }
 
-        // 删除过期的服务
-        for service_name in to_remove {
-            if registry.remove(&service_name).is_some() {
-                tracing::info!(
-                    service_name = %service_name,
-                    "Successfully removed expired service from registry"
-                );
+        for (service_name, instance_id) in expired_instances {
+            if let Some(service_entry) = registry.get(&service_name) {
+                let instances = service_entry.clone();
+                drop(service_entry);
+
+                if instances.remove(&instance_id).is_some() {
+                    tracing::info!(
+                        service_name = %service_name,
+                        instance_id = %instance_id,
+                        "Removed expired service instance from registry"
+                    );
+                }
+
+                if instances.is_empty() {
+                    registry.remove_if(&service_name, |_, inner: &ServiceInstances| {
+                        inner.is_empty()
+                    });
+                    tracing::info!(
+                        service_name = %service_name,
+                        "All instances expired, removed service from registry"
+                    );
+                }
             }
         }
     }
 
-    // 获取所有健康的服务
+    // 获取所有健康的服务（返回第一个健康实例的地址）
     pub fn get_healthy_services(&self) -> HashMap<String, String> {
-        self.registry
-            .iter()
-            .filter(|entry| entry.value().health_status == ServiceHealthStatus::Healthy)
-            .map(|entry| (entry.key().clone(), entry.value().address.clone()))
-            .collect()
+        let mut healthy = HashMap::new();
+
+        for service_entry in self.registry.iter() {
+            let service_name = service_entry.key().clone();
+            let instances = service_entry.value().clone();
+
+            for instance_entry in instances.iter() {
+                if instance_entry.value().health_status == ServiceHealthStatus::Healthy {
+                    healthy.insert(service_name.clone(), instance_entry.value().address.clone());
+                    break;
+                }
+            }
+        }
+
+        healthy
     }
 
-    // 获取服务信息
+    // 获取服务信息（返回第一个实例）
     pub fn get_service_info(&self, service_name: &str) -> Option<ServiceInfo> {
         self.registry
             .get(service_name)
-            .map(|entry| entry.value().clone())
+            .and_then(|instances| instances.iter().next().map(|entry| entry.value().clone()))
     }
 
-    // 手动更新服务健康状态
+    // 手动更新服务健康状态（应用到所有实例）
     pub fn update_service_health(&self, service_name: &str, status: ServiceHealthStatus) -> bool {
-        if let Some(mut entry) = self.registry.get_mut(service_name) {
-            tracing::info!(service_name = %service_name, new_status = ?status, "Updated health status for service");
-            entry.health_status = status;
-            true
+        if let Some(service_entry) = self.registry.get(service_name) {
+            let instances = service_entry.clone();
+            drop(service_entry);
+
+            let mut updated = false;
+            for mut instance in instances.iter_mut() {
+                instance.value_mut().health_status = status.clone();
+                updated = true;
+            }
+
+            if updated {
+                tracing::info!(
+                    service_name = %service_name,
+                    new_status = ?status,
+                    "Updated health status for all service instances"
+                );
+            }
+            updated
         } else {
             false
         }
     }
 
-    // 注销服务
+    // 注销服务（移除全部实例）
     pub fn unregister_service(&self, service_name: &str) -> bool {
-        if self.registry.remove(service_name).is_some() {
-            tracing::info!(service_name = %service_name, "Unregistered service");
+        if let Some((_name, instances)) = self.registry.remove(service_name) {
+            instances.clear();
+            tracing::info!(
+                service_name = %service_name,
+                "Unregistered service and cleared all instances"
+            );
             true
         } else {
             false

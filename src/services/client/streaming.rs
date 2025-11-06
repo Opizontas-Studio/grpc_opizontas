@@ -1,15 +1,11 @@
+use super::GatewayClientError;
+use crate::registry::{ForwardRequest, StreamingInfo, streaming_info::StreamType};
+use crate::services::gateway_client::GatewayClient;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt};
 use tonic::Status;
 use uuid::Uuid;
-use crate::registry::{
-    ForwardRequest, StreamingInfo,
-    streaming_info::StreamType,
-};
-use crate::services::gateway_client::GatewayClient;
-use super::GatewayClientError;
-
 
 /// 启动请求发送任务
 pub(crate) async fn spawn_request_sender<T>(
@@ -24,20 +20,20 @@ pub(crate) async fn spawn_request_sender<T>(
     let service_name = service_name.to_string();
     let method_path = method_path.to_string();
     let timeout = client.config.default_timeout.as_secs() as i32;
-    
+
     tokio::spawn(async move {
         let mut sequence_number = 0i64;
         let mut requests = requests;
-        
+
         while let Some(request_item) = requests.next().await {
             let payload = match super::generic::serialize_message_static(&request_item) {
                 Ok(p) => p,
                 Err(_) => break,
             };
-            
+
             let mut headers = HashMap::new();
             headers.insert("x-service-name".to_string(), service_name.clone());
-            
+
             let forward_request = ForwardRequest {
                 request_id: Uuid::new_v4().to_string(),
                 method_path: method_path.clone(),
@@ -51,17 +47,17 @@ pub(crate) async fn spawn_request_sender<T>(
                     chunk_size: 0,
                 }),
             };
-            
+
             sequence_number += 1;
             if request_tx.send(forward_request).await.is_err() {
                 break;
             }
         }
-        
+
         // 发送结束标记
         let mut end_headers = HashMap::new();
         end_headers.insert("x-service-name".to_string(), service_name);
-        
+
         let end_request = ForwardRequest {
             request_id: Uuid::new_v4().to_string(),
             method_path,
@@ -75,14 +71,17 @@ pub(crate) async fn spawn_request_sender<T>(
                 chunk_size: 0,
             }),
         };
-        
+
         let _ = request_tx.send(end_request).await;
     });
 }
 
 /// 启动响应处理任务
 pub(crate) async fn spawn_response_handler<R>(
-    mut inbound: impl Stream<Item = Result<crate::registry::ConnectionMessage, Status>> + Send + Unpin + 'static,
+    mut inbound: impl Stream<Item = Result<crate::registry::ConnectionMessage, Status>>
+    + Send
+    + Unpin
+    + 'static,
     response_tx: mpsc::Sender<Result<R, GatewayClientError>>,
 ) where
     R: prost::Message + Default + Send + 'static,
@@ -91,18 +90,23 @@ pub(crate) async fn spawn_response_handler<R>(
         while let Some(message_result) = inbound.next().await {
             match message_result {
                 Ok(message) => {
-                    if let Some(crate::registry::connection_message::MessageType::Response(response)) = message.message_type {
-                        let result = super::generic::deserialize_response_static::<R>(response.payload);
-                        
+                    if let Some(crate::registry::connection_message::MessageType::Response(
+                        response,
+                    )) = message.message_type
+                    {
+                        let result =
+                            super::generic::deserialize_response_static::<R>(response.payload);
+
                         if response_tx.send(result).await.is_err() {
                             break;
                         }
-                        
+
                         // 检查流结束
                         if let Some(streaming_info) = response.streaming_info
-                            && streaming_info.is_stream_end {
-                                break;
-                            }
+                            && streaming_info.is_stream_end
+                        {
+                            break;
+                        }
                     }
                 }
                 Err(e) => {
@@ -127,19 +131,19 @@ pub(crate) fn send_client_stream_requests<T>(
     let service_name = service_name.to_string();
     let method_path = method_path.to_string();
     let timeout = client.config.default_timeout.as_secs() as i32;
-    
+
     tokio::spawn(async move {
         let mut sequence_number = 0i64;
-        
+
         // 发送所有请求
         for request_item in requests {
             let Ok(payload) = super::generic::serialize_message_static(&request_item) else {
                 break;
             };
-            
+
             let mut headers = HashMap::new();
             headers.insert("x-service-name".to_string(), service_name.clone());
-            
+
             let forward_request = ForwardRequest {
                 request_id: Uuid::new_v4().to_string(),
                 method_path: method_path.clone(),
@@ -153,17 +157,17 @@ pub(crate) fn send_client_stream_requests<T>(
                     chunk_size: 0,
                 }),
             };
-            
+
             sequence_number += 1;
             if request_tx.send(forward_request).await.is_err() {
                 break;
             }
         }
-        
+
         // 发送结束标记
         let mut end_headers = HashMap::new();
         end_headers.insert("x-service-name".to_string(), service_name);
-        
+
         let end_request = ForwardRequest {
             request_id: Uuid::new_v4().to_string(),
             method_path,
@@ -177,7 +181,7 @@ pub(crate) fn send_client_stream_requests<T>(
                 chunk_size: 0,
             }),
         };
-        
+
         let _ = request_tx.send(end_request).await;
     });
 }
@@ -195,15 +199,15 @@ pub(crate) fn send_server_stream_request<T>(
     let service_name = service_name.to_string();
     let method_path = method_path.to_string();
     let timeout = client.config.default_timeout.as_secs() as i32;
-    
+
     tokio::spawn(async move {
         let Ok(payload) = super::generic::serialize_message_static(&request) else {
             return;
         };
-        
+
         let mut headers = HashMap::new();
         headers.insert("x-service-name".to_string(), service_name);
-        
+
         let forward_request = ForwardRequest {
             request_id: Uuid::new_v4().to_string(),
             method_path,
@@ -217,7 +221,7 @@ pub(crate) fn send_server_stream_request<T>(
                 chunk_size: 0,
             }),
         };
-        
+
         let _ = request_tx.send(forward_request).await;
     });
 }
@@ -238,20 +242,23 @@ pub(crate) fn spawn_server_stream_handler<R>(
                     break;
                 }
             };
-            
-            let Some(crate::registry::connection_message::MessageType::Response(response)) = message.message_type else {
+
+            let Some(crate::registry::connection_message::MessageType::Response(response)) =
+                message.message_type
+            else {
                 continue;
             };
-            
+
             let result = super::generic::deserialize_response_static::<R>(response.payload);
-            
+
             if response_tx.send(result).await.is_err() {
                 break;
             }
-            
+
             // 检查流结束标记
             if let Some(streaming_info) = response.streaming_info
-                && streaming_info.is_stream_end {
+                && streaming_info.is_stream_end
+            {
                 break;
             }
         }

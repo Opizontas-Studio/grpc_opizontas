@@ -6,9 +6,9 @@ pub mod response;
 pub use error::RouterError;
 
 use super::client_manager::GrpcClientManager;
-use crate::services::registry::{ServiceHealthStatus, ServiceRegistry};
 use super::connection::ReverseConnectionManager;
 use crate::config::Config;
+use crate::services::registry::{ServiceHealthStatus, ServiceRegistry};
 use futures::future::BoxFuture;
 use http_body::Body;
 use http_body_util::BodyExt;
@@ -90,7 +90,7 @@ impl DynamicRouter {
 
         // 检查是否为流式响应
         let is_streaming = ReverseConnectionManager::is_streaming_response(&forward_response);
-        
+
         // 添加响应头
         for (name, value) in forward_response.headers {
             response_builder = response_builder.header(name, value);
@@ -178,7 +178,7 @@ where
                             "Request forwarded successfully via reverse connection"
                         );
                         Ok(response)
-                    },
+                    }
                     Err(e) => {
                         tracing::error!(
                             service_name = %service_name,
@@ -194,10 +194,19 @@ where
             } else {
                 // 使用传统的正向连接转发请求
                 // 从注册表查找目标地址（使用 DashMap）
-                let target_addr = registry
-                    .get(&service_name)
-                    .filter(|entry| entry.value().health_status == ServiceHealthStatus::Healthy)
-                    .map(|entry| entry.value().address.clone());
+                let target_addr = if let Some(instances_guard) = registry.get(&service_name) {
+                    let instances = instances_guard.clone();
+                    drop(instances_guard);
+
+                    instances
+                        .iter()
+                        .find(|instance| {
+                            instance.value().health_status == ServiceHealthStatus::Healthy
+                        })
+                        .map(|instance| instance.value().address.clone())
+                } else {
+                    None
+                };
                 tracing::debug!(
                     service_name = %service_name,
                     path = %path,
@@ -213,7 +222,7 @@ where
                             path = %path,
                             "Forwarding request to healthy service instance"
                         );
-                        
+
                         // 转发请求到目标服务
                         match forwarder::forward_request(&client_manager, &config, req, addr).await
                         {
@@ -225,7 +234,7 @@ where
                                     "Request forwarded successfully"
                                 );
                                 Ok(response)
-                            },
+                            }
                             Err(e) => {
                                 tracing::error!(
                                     service_name = %service_name,

@@ -1,12 +1,11 @@
-use std::time::{SystemTime, Duration};
+use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 
+use super::GatewayClientError;
 use crate::registry::{
-    ConnectionMessage, EventMessage, SubscriptionRequest,
-    connection_message::MessageType,
+    ConnectionMessage, EventMessage, SubscriptionRequest, connection_message::MessageType,
     subscription_request::Action,
 };
-use super::GatewayClientError;
 use crate::services::gateway_client::GatewayClient;
 
 /// 事件客户端 - 基于现有 GatewayClient 扩展事件发布订阅功能
@@ -51,10 +50,7 @@ impl EventClient {
     }
 
     /// 订阅事件类型
-    pub async fn subscribe_events(
-        &self,
-        event_types: Vec<&str>,
-    ) -> Result<(), GatewayClientError> {
+    pub async fn subscribe_events(&self, event_types: Vec<&str>) -> Result<(), GatewayClientError> {
         let subscription = SubscriptionRequest {
             action: Action::Subscribe as i32,
             event_types: event_types.iter().map(|s| s.to_string()).collect(),
@@ -96,11 +92,11 @@ impl EventClient {
             connection_id = %self.connection_id,
             "Sending connection message"
         );
-        
+
         // 创建 GatewayClient 的可变引用来发送消息
         // 注意：这里需要克隆 GatewayClient，因为它实现了 Clone trait
         let mut client = self.gateway_client.clone();
-        
+
         // 调用 GatewayClient 的 send_connection_message 方法，并添加错误处理
         match client.send_connection_message(message).await {
             Ok(()) => {
@@ -135,7 +131,7 @@ impl EventClient {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     attempts += 1;
-                    
+
                     if attempts > max_retries {
                         tracing::error!(
                             error = %e,
@@ -186,7 +182,8 @@ impl EventClient {
             message_type: Some(MessageType::Event(event)),
         };
 
-        self.send_connection_message_with_retry(message, max_retries).await
+        self.send_connection_message_with_retry(message, max_retries)
+            .await
     }
 }
 
@@ -215,9 +212,9 @@ impl EventClientBuilder {
     }
 
     pub fn build(self) -> Result<EventClient, String> {
-        let gateway_client = self.gateway_client
-            .ok_or("Gateway client is required")?;
-        let connection_id = self.connection_id
+        let gateway_client = self.gateway_client.ok_or("Gateway client is required")?;
+        let connection_id = self
+            .connection_id
             .unwrap_or_else(|| Uuid::new_v4().to_string());
 
         Ok(EventClient::new(gateway_client, connection_id))

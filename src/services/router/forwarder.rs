@@ -27,7 +27,7 @@ where
     // 提前提取需要的信息，避免借用冲突
     let method = req.method().as_str().to_string();
     let uri = req.uri().to_string();
-    
+
     tracing::debug!(
         target_addr = %target_addr,
         method = %method,

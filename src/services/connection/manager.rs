@@ -1,24 +1,90 @@
 use dashmap::DashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant, SystemTime};
+use tokio::sync::{RwLock, mpsc};
 use tokio_util::task::TaskTracker;
 use uuid::Uuid;
 
 use crate::registry::{ConnectionMessage, ForwardRequest, ForwardResponse};
-use crate::services::registry::types::ServiceRegistry;
 use crate::services::event::{EventBus, EventConfig};
+use crate::services::registry::types::{ServiceInstances, ServiceRegistry};
 
 use super::{
     connection::ReverseConnection,
     types::{PendingRequest, ReverseConnectionConfig, StreamingResponseHandler},
 };
 
+#[derive(Debug, Clone)]
+struct ServicePool {
+    connections: Arc<DashMap<String, ReverseConnection>>,
+    cursor: Arc<AtomicUsize>,
+}
+
+impl ServicePool {
+    fn new() -> Self {
+        Self {
+            connections: Arc::new(DashMap::new()),
+            cursor: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn add_connection(&self, connection: ReverseConnection) -> Option<ReverseConnection> {
+        self.connections
+            .insert(connection.connection_id.clone(), connection)
+    }
+
+    fn remove_connection(&self, connection_id: &str) -> Option<ReverseConnection> {
+        self.connections.remove(connection_id).map(|(_, conn)| conn)
+    }
+
+    fn next_connection(&self, timeout: Duration) -> Option<ReverseConnection> {
+        let mut active = Vec::new();
+        let mut expired_ids = Vec::new();
+
+        for entry in self.connections.iter() {
+            let conn = entry.value().clone();
+            if conn.is_active && !conn.is_expired(timeout) {
+                active.push(conn);
+            } else {
+                expired_ids.push(entry.key().clone());
+            }
+        }
+
+        for id in expired_ids {
+            self.connections.remove(&id);
+        }
+
+        if active.is_empty() {
+            return None;
+        }
+
+        let idx = self.cursor.fetch_add(1, Ordering::Relaxed);
+        Some(active[idx % active.len()].clone())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.connections.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.connections.len()
+    }
+
+    fn update_connection<F>(&self, connection_id: &str, mut update_fn: F)
+    where
+        F: FnMut(&mut ReverseConnection),
+    {
+        if let Some(mut entry) = self.connections.get_mut(connection_id) {
+            update_fn(entry.value_mut());
+        }
+    }
+}
 // 反向连接管理器
 #[derive(Debug, Clone)]
 pub struct ReverseConnectionManager {
     // 服务名 -> 反向连接映射
-    connections_by_service: Arc<DashMap<String, ReverseConnection>>,
+    connections_by_service: Arc<DashMap<String, ServicePool>>,
     // 连接ID -> 反向连接映射
     connections_by_id: Arc<DashMap<String, ReverseConnection>>,
     // 等待响应的请求
@@ -35,7 +101,11 @@ pub struct ReverseConnectionManager {
 
 impl Default for ReverseConnectionManager {
     fn default() -> Self {
-        Self::new(ReverseConnectionConfig::default(), None, EventConfig::default())
+        Self::new(
+            ReverseConnectionConfig::default(),
+            None,
+            EventConfig::default(),
+        )
     }
 }
 
@@ -46,12 +116,12 @@ impl ReverseConnectionManager {
         if id.len() != 36 {
             return false;
         }
-        
+
         let parts: Vec<&str> = id.split('-').collect();
         if parts.len() != 5 {
             return false;
         }
-        
+
         let expected_lengths = [8, 4, 4, 4, 12];
         for (i, part) in parts.iter().enumerate() {
             if part.len() != expected_lengths[i] {
@@ -61,12 +131,12 @@ impl ReverseConnectionManager {
                 return false;
             }
         }
-        
+
         true
     }
 
     pub fn new(
-        config: ReverseConnectionConfig, 
+        config: ReverseConnectionConfig,
         service_registry: Option<ServiceRegistry>,
         event_config: EventConfig,
     ) -> Self {
@@ -104,108 +174,110 @@ impl ReverseConnectionManager {
             request_sender,
         };
 
-        // 首先收集需要清理的旧连接
-        let mut old_connections_to_cleanup = Vec::new();
-        
-        // 原子性地处理服务映射，替换旧连接
         for service in &services {
-            // 使用 entry API 原子性地替换旧连接
-            if let Some(old_connection) = self.connections_by_service.insert(service.clone(), new_connection.clone()) {
-                // 如果旧连接的ID不同，需要清理
-                if old_connection.connection_id != connection_id {
-                    old_connections_to_cleanup.push(old_connection.clone());
+            let pool = self
+                .connections_by_service
+                .entry(service.clone())
+                .or_insert_with(ServicePool::new);
+
+            match pool.add_connection(new_connection.clone()) {
+                Some(_) => {
                     tracing::info!(
                         service_name = %service,
-                        new_connection_id = %connection_id,
-                        old_connection_id = %old_connection.connection_id,
-                        "REPLACED: Service mapping updated from old to new connection"
-                    );
-                } else {
-                    tracing::debug!(
-                        service_name = %service,
                         connection_id = %connection_id,
-                        "Service mapping updated for same connection (reconnection)"
+                        "Updated existing reverse connection instance in service pool"
                     );
                 }
-            } else {
-                tracing::info!(
-                    service_name = %service,
-                    connection_id = %connection_id,
-                    "NEW: Registered reverse connection for service"
-                );
+                None => {
+                    tracing::info!(
+                        service_name = %service,
+                        connection_id = %connection_id,
+                        pool_size = pool.len(),
+                        "Registered reverse connection instance for service"
+                    );
+                }
             }
         }
 
-        // 按连接ID存储新连接
-        self.connections_by_id.insert(connection_id.clone(), new_connection);
-
-        // 清理被替换的旧连接
-        for old_connection in old_connections_to_cleanup {
-            self.cleanup_replaced_connection(&old_connection.connection_id).await;
+        if let Some(old_connection) = self
+            .connections_by_id
+            .insert(connection_id.clone(), new_connection.clone())
+        {
+            tracing::info!(
+                new_connection_id = %connection_id,
+                old_connection_id = %old_connection.connection_id,
+                "Replaced existing reverse connection with identical connection_id"
+            );
+            self.detach_connection(&old_connection);
         }
 
         Ok(())
     }
 
-    // 清理被替换的连接
-    async fn cleanup_replaced_connection(&self, old_connection_id: &str) {
-        if let Some((_, old_connection)) = self.connections_by_id.remove(old_connection_id) {
-            // 从服务映射中移除旧连接（只移除指向这个旧连接的映射）
-            for service in &old_connection.services {
-                // 检查当前服务映射是否仍指向旧连接
-                if let Some(current_connection) = self.connections_by_service.get(service) {
-                    if current_connection.connection_id == *old_connection_id {
-                        // 这是一个孤立的映射，移除它
-                        self.connections_by_service.remove(service);
-                    }
+    fn detach_connection(&self, connection: &ReverseConnection) {
+        for service in &connection.services {
+            if let Some(pool_entry) = self.connections_by_service.get(service) {
+                let pool = pool_entry.clone();
+                drop(pool_entry);
+
+                if pool.remove_connection(&connection.connection_id).is_some() {
+                    tracing::info!(
+                        service_name = %service,
+                        connection_id = %connection.connection_id,
+                        "Detached reverse connection instance from service pool"
+                    );
+                }
+
+                if pool.is_empty() {
+                    self.connections_by_service
+                        .remove_if(service, |_, p| p.is_empty());
+                    tracing::debug!(
+                        service_name = %service,
+                        connection_id = %connection.connection_id,
+                        "Service pool empty after detaching connection, removed mapping"
+                    );
                 }
             }
 
-            // 同时从主服务注册表中移除该服务，确保状态同步
-            if let Some(ref service_registry) = self.service_registry {
-                for service in &old_connection.services {
-                    if service_registry.remove(service).is_some() {
-                        tracing::info!(
-                            service_name = %service,
-                            old_connection_id = %old_connection_id,
-                            "CLEANUP: Removed replaced service from main registry"
-                        );
-                    }
+            self.remove_service_registry_instance(service, &connection.connection_id);
+        }
+    }
+
+    fn remove_service_registry_instance(&self, service_name: &str, instance_id: &str) {
+        if let Some(ref service_registry) = self.service_registry {
+            if let Some(instances_guard) = service_registry.get(service_name) {
+                let instances = instances_guard.clone();
+                drop(instances_guard);
+
+                if instances.remove(instance_id).is_some() {
+                    tracing::info!(
+                        service_name = %service_name,
+                        instance_id = %instance_id,
+                        "Removed service instance from registry"
+                    );
+                }
+
+                if instances.is_empty() {
+                    service_registry
+                        .remove_if(service_name, |_, v: &ServiceInstances| v.is_empty());
+                    tracing::debug!(
+                        service_name = %service_name,
+                        "Service registry entry empty, removed service"
+                    );
                 }
             }
-
-            tracing::info!(
-                old_connection_id = %old_connection_id,
-                services = ?old_connection.services,
-                "Cleaned up replaced reverse connection"
-            );
         }
     }
 
     // 注销反向连接
     pub async fn unregister_connection(&self, connection_id: &str) {
         if let Some((_id, connection)) = self.connections_by_id.remove(connection_id) {
-            // 从服务映射中移除
-            for service in &connection.services {
-                self.connections_by_service.remove(service);
-
-                // 同时从主服务注册表中移除该服务
-                if let Some(ref service_registry) = self.service_registry {
-                    if service_registry.remove(service).is_some() {
-                        tracing::info!(
-                            service_name = %service,
-                            connection_id = %connection_id,
-                            "Removed service from main registry due to reverse connection disconnection"
-                        );
-                    }
-                }
-
-                tracing::info!(
-                    service_name = %service,
-                    connection_id = %connection_id,
-                    "Unregistered reverse connection for service"
-                );
-            }
+            self.detach_connection(&connection);
+            tracing::info!(
+                connection_id = %connection_id,
+                services = ?connection.services,
+                "Unregistered reverse connection and cleaned up service mappings"
+            );
         }
     }
 
@@ -214,23 +286,21 @@ impl ReverseConnectionManager {
         // 检查连接ID格式并记录诊断信息
         let is_valid_uuid = Self::is_valid_connection_id(connection_id);
         let is_empty = connection_id.is_empty();
-        
+
         // 首先尝试按连接ID查找
         if let Some(mut connection) = self.connections_by_id.get_mut(connection_id) {
             let now = std::time::Instant::now();
             let old_heartbeat = connection.last_heartbeat;
             connection.update_heartbeat();
             let services = connection.services.clone();
-            
+
             // 同时更新 connections_by_service 中的副本
             for service_name in &services {
-                if let Some(mut service_connection) = self.connections_by_service.get_mut(service_name) {
-                    if service_connection.connection_id == connection_id {
-                        service_connection.last_heartbeat = now;
-                    }
+                if let Some(pool) = self.connections_by_service.get(service_name) {
+                    pool.update_connection(connection_id, |conn| conn.last_heartbeat = now);
                 }
             }
-            
+
             tracing::debug!(
                 connection_id = %connection_id,
                 services = ?services,
@@ -238,49 +308,57 @@ impl ReverseConnectionManager {
                 new_heartbeat_set = %now.elapsed().as_millis(),
                 "Updated heartbeat for reverse connection in both mappings"
             );
-            
+
             // 同时更新服务注册表中对应服务的心跳时间戳
-            self.update_service_registry_heartbeat(&services).await;
+            self.update_service_registry_heartbeat(connection_id, &services)
+                .await;
             return;
         }
-        
+
         // 如果按连接ID找不到，尝试按服务名查找（兼容错误的客户端）
-        if let Some(connection_ref) = self.connections_by_service.get(connection_id) {
-            let actual_connection_id = connection_ref.connection_id.clone();
-            drop(connection_ref); // 释放读锁
-            
-            if let Some(mut connection) = self.connections_by_id.get_mut(&actual_connection_id) {
-                let now = std::time::Instant::now();
-                let old_heartbeat = connection.last_heartbeat;
-                connection.update_heartbeat();
-                let services = connection.services.clone();
-                
-                // 同时更新 connections_by_service 中的副本
-                for service_name in &services {
-                    if let Some(mut service_connection) = self.connections_by_service.get_mut(service_name) {
-                        if service_connection.connection_id == actual_connection_id {
-                            service_connection.last_heartbeat = now;
+        if let Some(pool_ref) = self.connections_by_service.get(connection_id) {
+            let pool = pool_ref.clone();
+            drop(pool_ref);
+
+            if let Some(actual_connection) = pool.next_connection(self.config.heartbeat_timeout) {
+                let actual_connection_id = actual_connection.connection_id.clone();
+
+                if let Some(mut connection) = self.connections_by_id.get_mut(&actual_connection_id)
+                {
+                    let now = std::time::Instant::now();
+                    let old_heartbeat = connection.last_heartbeat;
+                    connection.update_heartbeat();
+                    let services = connection.services.clone();
+
+                    // 同时更新 connections_by_service 中的副本
+                    for service_name in &services {
+                        if let Some(service_pool) = self.connections_by_service.get(service_name) {
+                            service_pool.update_connection(&actual_connection_id, |conn| {
+                                conn.last_heartbeat = now;
+                            });
                         }
                     }
+
+                    tracing::error!(
+                        received_id = %connection_id,
+                        actual_connection_id = %actual_connection_id,
+                        services = ?services,
+                        is_valid_uuid = %is_valid_uuid,
+                        old_heartbeat_elapsed_ms = %old_heartbeat.elapsed().as_millis(),
+                        new_heartbeat_set = %now.elapsed().as_millis(),
+                        "CLIENT ERROR: Using service name as heartbeat ID! Client must use connection_id: '{}' for heartbeat, not service name: '{}'. Heartbeat updated in both mappings.",
+                        actual_connection_id,
+                        connection_id
+                    );
+
+                    // 同时更新服务注册表中对应服务的心跳时间戳
+                    self.update_service_registry_heartbeat(&actual_connection_id, &services)
+                        .await;
+                    return;
                 }
-                
-                tracing::error!(
-                    received_id = %connection_id,
-                    actual_connection_id = %actual_connection_id,
-                    services = ?services,
-                    is_valid_uuid = %is_valid_uuid,
-                    old_heartbeat_elapsed_ms = %old_heartbeat.elapsed().as_millis(),
-                    new_heartbeat_set = %now.elapsed().as_millis(),
-                    "CLIENT ERROR: Using service name as heartbeat ID! Client must use connection_id: '{}' for heartbeat, not service name: '{}'. Heartbeat updated in both mappings.",
-                    actual_connection_id, connection_id
-                );
-                
-                // 同时更新服务注册表中对应服务的心跳时间戳
-                self.update_service_registry_heartbeat(&services).await;
-                return;
             }
         }
-        
+
         // 提供详细的错误诊断和客户端指导
         if is_empty {
             tracing::error!(
@@ -307,16 +385,22 @@ impl ReverseConnectionManager {
     }
 
     // 辅助方法：更新服务注册表中的心跳时间戳
-    async fn update_service_registry_heartbeat(&self, services: &[String]) {
+    async fn update_service_registry_heartbeat(&self, connection_id: &str, services: &[String]) {
         if let Some(ref service_registry) = self.service_registry {
-            let now = std::time::SystemTime::now();
+            let now = SystemTime::now();
             for service_name in services {
-                if let Some(mut service_info) = service_registry.get_mut(service_name) {
-                    service_info.last_heartbeat = now;
-                    tracing::debug!(
-                        service_name = %service_name,
-                        "Updated service heartbeat in registry"
-                    );
+                if let Some(instances_guard) = service_registry.get(service_name) {
+                    let instances = instances_guard.clone();
+                    drop(instances_guard);
+
+                    if let Some(mut instance) = instances.get_mut(connection_id) {
+                        instance.value_mut().last_heartbeat = now;
+                        tracing::debug!(
+                            service_name = %service_name,
+                            connection_id = %connection_id,
+                            "Updated service instance heartbeat in registry"
+                        );
+                    }
                 }
             }
         }
@@ -324,33 +408,30 @@ impl ReverseConnectionManager {
 
     // 获取服务的反向连接 - 增强状态验证和诊断
     pub fn get_connection_for_service(&self, service_name: &str) -> Option<ReverseConnection> {
-        // 首先尝试精确匹配，并记录详细诊断信息
-        if let Some(conn_ref) = self.connections_by_service.get(service_name) {
-            let conn = conn_ref.clone();
-            let is_active = conn.is_active;
-            let is_expired = conn.is_expired(self.config.heartbeat_timeout);
-            let last_heartbeat_ago = conn.last_heartbeat.elapsed();
-            
-            tracing::debug!(
-                service_name = %service_name,
-                connection_id = %conn.connection_id,
-                is_active = %is_active,
-                is_expired = %is_expired,
-                last_heartbeat_ago_ms = %last_heartbeat_ago.as_millis(),
-                heartbeat_timeout_ms = %self.config.heartbeat_timeout.as_millis(),
-                "Found service connection, checking validity"
-            );
-            
-            if is_active && !is_expired {
+        if let Some(pool_ref) = self.connections_by_service.get(service_name) {
+            let pool = pool_ref.clone();
+            drop(pool_ref);
+
+            if let Some(conn) = pool.next_connection(self.config.heartbeat_timeout) {
+                let last_heartbeat_ago = conn.last_heartbeat.elapsed();
+
+                tracing::debug!(
+                    service_name = %service_name,
+                    connection_id = %conn.connection_id,
+                    last_heartbeat_ago_ms = %last_heartbeat_ago.as_millis(),
+                    heartbeat_timeout_ms = %self.config.heartbeat_timeout.as_millis(),
+                    pool_size = %pool.len(),
+                    "Selected reverse connection instance for service"
+                );
+
                 return Some(conn);
             } else {
                 tracing::warn!(
                     service_name = %service_name,
-                    connection_id = %conn.connection_id,
-                    is_active = %is_active,
-                    is_expired = %is_expired,
-                    "Service connection found but invalid, trying hierarchical lookup"
+                    "No active reverse connections available in service pool"
                 );
+                self.connections_by_service
+                    .remove_if(service_name, |_, p| p.is_empty());
             }
         } else {
             tracing::debug!(
@@ -359,54 +440,65 @@ impl ReverseConnectionManager {
             );
         }
 
-        // 如果精确匹配失败，尝试层级服务名称查找
         let result = self.find_connection_by_hierarchical_name(service_name);
-        
-        // 如果找不到有效的反向连接，主动清理孤立的服务注册条目
+
         if result.is_none() {
             self.cleanup_orphaned_service_registry_entry(service_name);
         }
-        
+
         result
     }
 
     // 清理孤立的服务注册表条目（没有对应反向连接的服务）
     fn cleanup_orphaned_service_registry_entry(&self, service_name: &str) {
         if let Some(ref service_registry) = self.service_registry {
-            if service_registry.remove(service_name).is_some() {
+            if service_registry
+                .remove_if(service_name, |_, instances: &ServiceInstances| {
+                    instances.is_empty()
+                })
+                .is_some()
+            {
                 tracing::warn!(
                     service_name = %service_name,
-                    "CONSISTENCY FIX: Removed orphaned service from registry (no valid reverse connection)"
+                    "CONSISTENCY FIX: Removed orphaned service from registry (no valid reverse connections remaining)"
                 );
             }
         }
     }
 
     // 通过层级服务名称查找连接（支持 parent.child -> parent 的映射）
-    fn find_connection_by_hierarchical_name(&self, service_name: &str) -> Option<ReverseConnection> {
+    fn find_connection_by_hierarchical_name(
+        &self,
+        service_name: &str,
+    ) -> Option<ReverseConnection> {
         // 将服务名按 '.' 分割，从最长的父级开始尝试
         let parts: Vec<&str> = service_name.split('.').collect();
-        
+
         // 从完整名称开始，逐步减少层级，直到找到匹配的服务
         for i in (1..parts.len()).rev() {
             let parent_name = parts[0..i].join(".");
-            
+
             tracing::debug!(
                 requested_service = %service_name,
                 trying_parent = %parent_name,
                 "Attempting hierarchical service name lookup"
             );
-            
-            if let Some(conn) = self.connections_by_service
-                .get(&parent_name)
-                .filter(|conn| conn.is_active && !conn.is_expired(self.config.heartbeat_timeout))
-            {
-                tracing::info!(
-                    requested_service = %service_name,
-                    matched_service = %parent_name,
-                    "Found connection using hierarchical service name lookup"
-                );
-                return Some(conn.clone());
+
+            if let Some(pool_ref) = self.connections_by_service.get(&parent_name) {
+                let pool = pool_ref.clone();
+                drop(pool_ref);
+
+                if let Some(conn) = pool.next_connection(self.config.heartbeat_timeout) {
+                    tracing::info!(
+                        requested_service = %service_name,
+                        matched_service = %parent_name,
+                        "Found connection using hierarchical service name lookup"
+                    );
+                    return Some(conn);
+                } else {
+                    self.connections_by_service
+                        .remove_if(&parent_name, |_, p| p.is_empty());
+                }
             }
         }
 
@@ -532,7 +624,7 @@ impl ReverseConnectionManager {
                 forward_request,
             )),
         };
-        
+
         tracing::debug!(
             service_name = %service_name,
             method_path = %method_path,
@@ -547,7 +639,7 @@ impl ReverseConnectionManager {
             // 移除等待中的请求
             let pending_requests = self.pending_requests.read().await;
             pending_requests.remove(&request_id);
-            
+
             tracing::error!(
                 service_name = %service_name,
                 method_path = %method_path,
@@ -555,7 +647,7 @@ impl ReverseConnectionManager {
                 connection_id = %connection.connection_id,
                 "Failed to send request to microservice - connection channel closed"
             );
-            
+
             return Err("Failed to send request to microservice".to_string());
         }
 
@@ -571,26 +663,26 @@ impl ReverseConnectionManager {
                     "Received response via reverse connection"
                 );
                 Ok(response)
-            },
+            }
             Ok(Err(_)) => {
                 // 移除等待中的请求
                 let pending_requests = self.pending_requests.read().await;
                 pending_requests.remove(&request_id);
-                
+
                 tracing::error!(
                     service_name = %service_name,
                     method_path = %method_path,
                     request_id = %request_id,
                     "Response channel closed - microservice disconnected unexpectedly"
                 );
-                
+
                 Err("Response channel closed".to_string())
             }
             Err(_) => {
                 // 移除等待中的请求
                 let pending_requests = self.pending_requests.read().await;
                 pending_requests.remove(&request_id);
-                
+
                 tracing::error!(
                     service_name = %service_name,
                     method_path = %method_path,
@@ -598,7 +690,7 @@ impl ReverseConnectionManager {
                     timeout_ms = self.config.request_timeout.as_millis(),
                     "Request timeout - microservice did not respond in time"
                 );
-                
+
                 Err("Request timeout".to_string())
             }
         }
@@ -736,7 +828,10 @@ impl ReverseConnectionManager {
 
     // 检查服务是否支持反向连接
     pub fn has_reverse_connection(&self, service_name: &str) -> bool {
-        self.connections_by_service.contains_key(service_name)
+        self.connections_by_service
+            .get(service_name)
+            .map(|pool| !pool.is_empty())
+            .unwrap_or(false)
     }
 
     // 获取连接统计信息
@@ -766,7 +861,11 @@ impl ReverseConnectionManager {
         &self,
         subscription: crate::registry::SubscriptionRequest,
     ) -> Result<(), String> {
-        match self.event_bus.handle_subscription_request(subscription).await {
+        match self
+            .event_bus
+            .handle_subscription_request(subscription)
+            .await
+        {
             Ok(()) => Ok(()),
             Err(err) => {
                 tracing::warn!(error = %err, "Failed to handle subscription request");
@@ -780,8 +879,14 @@ impl ReverseConnectionManager {
         &self,
         connection_id: &str,
         event_type: &str,
-    ) -> Result<impl tokio_stream::Stream<Item = Result<crate::registry::EventMessage, tonic::Status>>, String> {
-        match self.event_bus.subscribe_event_type(event_type, connection_id) {
+    ) -> Result<
+        impl tokio_stream::Stream<Item = Result<crate::registry::EventMessage, tonic::Status>>,
+        String,
+    > {
+        match self
+            .event_bus
+            .subscribe_event_type(event_type, connection_id)
+        {
             Ok(stream) => Ok(stream),
             Err(err) => {
                 tracing::warn!(
@@ -812,6 +917,7 @@ impl ReverseConnectionManager {
         let heartbeat_timeout = self.config.heartbeat_timeout;
         let request_timeout = self.config.request_timeout;
         let cleanup_interval = self.config.cleanup_interval;
+        let service_registry = self.service_registry.clone();
 
         self.task_tracker.spawn(async move {
             let mut interval = tokio::time::interval(cleanup_interval);
@@ -820,34 +926,35 @@ impl ReverseConnectionManager {
                 Self::cleanup_expired_connections(
                     &connections_by_service,
                     &connections_by_id,
+                    service_registry.clone(),
                     heartbeat_timeout,
-                )
-                .await;
+                );
                 Self::cleanup_expired_requests(&pending_requests, request_timeout).await;
             }
         });
     }
 
     // 清理过期连接
-    async fn cleanup_expired_connections(
-        connections_by_service: &Arc<DashMap<String, ReverseConnection>>,
+    fn cleanup_expired_connections(
+        connections_by_service: &Arc<DashMap<String, ServicePool>>,
         connections_by_id: &Arc<DashMap<String, ReverseConnection>>,
+        service_registry: Option<ServiceRegistry>,
         timeout: Duration,
     ) {
         let mut expired_connections = Vec::new();
 
-        // 收集过期连接
         for entry in connections_by_id.iter() {
-            let connection_id = entry.key();
             let connection = entry.value();
 
             if connection.is_expired(timeout) {
-                expired_connections.push((connection_id.clone(), connection.services.clone()));
+                expired_connections.push(connection.clone());
             }
         }
 
-        // 移除过期连接
-        for (connection_id, services) in expired_connections {
+        for connection in expired_connections {
+            let connection_id = connection.connection_id.clone();
+            let services = connection.services.clone();
+
             tracing::warn!(
                 connection_id = %connection_id,
                 services_count = services.len(),
@@ -856,12 +963,45 @@ impl ReverseConnectionManager {
 
             connections_by_id.remove(&connection_id);
             for service in &services {
-                connections_by_service.remove(service);
-                tracing::debug!(
-                    service_name = %service,
-                    connection_id = %connection_id,
-                    "Removed expired reverse connection for service"
-                );
+                if let Some(pool_entry) = connections_by_service.get(service) {
+                    let pool = pool_entry.clone();
+                    drop(pool_entry);
+
+                    if pool.remove_connection(&connection_id).is_some() {
+                        tracing::debug!(
+                            service_name = %service,
+                            connection_id = %connection_id,
+                            "Removed expired reverse connection instance from service pool"
+                        );
+                    }
+
+                    if pool.is_empty() {
+                        connections_by_service.remove_if(service, |_, p| p.is_empty());
+                        tracing::debug!(
+                            service_name = %service,
+                            "Service pool empty after removing expired connections, removed mapping"
+                        );
+                    }
+                }
+
+                if let Some(ref registry) = service_registry {
+                    if let Some(instances_guard) = registry.get(service) {
+                        let instances = instances_guard.clone();
+                        drop(instances_guard);
+
+                        if instances.remove(&connection_id).is_some() {
+                            tracing::debug!(
+                                service_name = %service,
+                                connection_id = %connection_id,
+                                "Removed expired service instance from registry"
+                            );
+                        }
+
+                        if instances.is_empty() {
+                            registry.remove_if(service, |_, v: &ServiceInstances| v.is_empty());
+                        }
+                    }
+                }
             }
         }
     }

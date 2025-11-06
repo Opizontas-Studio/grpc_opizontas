@@ -1,3 +1,5 @@
+use dashmap::DashMap;
+use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -40,7 +42,30 @@ impl RegistryService for MyRegistryService {
                 address = %req.address,
                 "Registering service"
             );
-            self.registry.insert(service_name, service_info.clone());
+            let instances = self
+                .registry
+                .entry(service_name.clone())
+                .or_insert_with(|| Arc::new(DashMap::new()))
+                .clone();
+
+            let instance_id = req.address.clone();
+
+            match instances.insert(instance_id.clone(), service_info.clone()) {
+                Some(_) => {
+                    tracing::info!(
+                        service_name = %service_name,
+                        address = %req.address,
+                        "Updated existing service instance registration"
+                    );
+                }
+                None => {
+                    tracing::info!(
+                        service_name = %service_name,
+                        address = %req.address,
+                        "Registered new service instance"
+                    );
+                }
+            }
         }
 
         let reply = RegisterResponse {
@@ -120,7 +145,7 @@ impl RegistryService for MyRegistryService {
                 connection_id: connection_id.clone(),
                 status: StatusType::Connected as i32,
                 message: format!(
-                    "Connection established. IMPORTANT: Use connection_id '{}' for ALL heartbeat messages, not service names", 
+                    "Connection established. IMPORTANT: Use connection_id '{}' for ALL heartbeat messages, not service names",
                     connection_id
                 ),
             })),
@@ -175,7 +200,8 @@ impl MyRegistryService {
                                 message_type,
                                 &reverse_manager,
                                 &outbound_tx,
-                            ).await;
+                            )
+                            .await;
                             if should_break {
                                 break;
                             }
@@ -189,7 +215,9 @@ impl MyRegistryService {
             }
 
             reverse_manager.unregister_connection(&connection_id).await;
-            reverse_manager.cleanup_connection_subscriptions(&connection_id).await;
+            reverse_manager
+                .cleanup_connection_subscriptions(&connection_id)
+                .await;
             tracing::info!(connection_id = %connection_id, "Reverse connection closed");
         });
     }
@@ -209,7 +237,9 @@ impl MyRegistryService {
                     heartbeat_connection_id = %heartbeat.connection_id,
                     "Received heartbeat message"
                 );
-                reverse_manager.update_heartbeat(&heartbeat.connection_id).await;
+                reverse_manager
+                    .update_heartbeat(&heartbeat.connection_id)
+                    .await;
                 false
             }
             MessageType::Status(status) => {
@@ -227,7 +257,8 @@ impl MyRegistryService {
                     request,
                     (*reverse_manager).clone(),
                     outbound_tx.clone(),
-                ).await;
+                )
+                .await;
                 false
             }
             MessageType::Register(_) => {
@@ -241,7 +272,7 @@ impl MyRegistryService {
                     event_id = %event.event_id,
                     "Received event message for publishing"
                 );
-                
+
                 tokio::spawn({
                     let reverse_manager = (*reverse_manager).clone();
                     async move {
@@ -260,11 +291,14 @@ impl MyRegistryService {
                     action = ?subscription.action(),
                     "Received subscription request"
                 );
-                
+
                 tokio::spawn({
                     let reverse_manager = (*reverse_manager).clone();
                     async move {
-                        if let Err(err) = reverse_manager.handle_subscription_request(subscription).await {
+                        if let Err(err) = reverse_manager
+                            .handle_subscription_request(subscription)
+                            .await
+                        {
                             tracing::error!(error = %err, "Failed to handle subscription request");
                         }
                     }
@@ -289,7 +323,11 @@ impl MyRegistryService {
         let streaming_info = request.streaming_info;
 
         tokio::spawn(async move {
-            let result = MyRegistryService::handle_service_request(std::sync::Arc::new(reverse_manager), request).await;
+            let result = MyRegistryService::handle_service_request(
+                std::sync::Arc::new(reverse_manager),
+                request,
+            )
+            .await;
             Self::send_response_or_error(result, request_id, streaming_info, outbound_tx).await;
         });
     }

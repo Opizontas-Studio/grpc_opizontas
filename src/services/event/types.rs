@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use thiserror::Error;
-use serde::{Deserialize, Serialize};
 
 /// 事件总线配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,19 +41,19 @@ impl Default for EventConfig {
 pub enum EventError {
     #[error("No subscribers for event type: {event_type}")]
     NoSubscribers { event_type: String },
-    
+
     #[error("Channel capacity exceeded for event type: {event_type}")]
     ChannelFull { event_type: String },
-    
+
     #[error("Invalid event type: {event_type}")]
     InvalidEventType { event_type: String },
-    
+
     #[error("Subscriber limit exceeded for event type: {event_type}")]
     SubscriberLimitExceeded { event_type: String },
-    
+
     #[error("Broadcast receiver error: {0}")]
     BroadcastError(#[from] tokio::sync::broadcast::error::RecvError),
-    
+
     #[error("Internal error: {0}")]
     Internal(String),
 }

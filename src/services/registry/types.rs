@@ -17,5 +17,7 @@ pub enum ServiceHealthStatus {
     Unknown,
 }
 
-// 定义增强的服务注册表
-pub type ServiceRegistry = Arc<DashMap<String, ServiceInfo>>;
+pub type ServiceInstances = Arc<DashMap<String, ServiceInfo>>;
+
+// 定义增强的服务注册表（服务名 -> 服务实例集合）
+pub type ServiceRegistry = Arc<DashMap<String, ServiceInstances>>;

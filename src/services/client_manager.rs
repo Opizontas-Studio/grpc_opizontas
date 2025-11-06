@@ -35,7 +35,6 @@ pub struct ConnectionMetadata {
 }
 
 impl ConnectionMetadata {
-
     pub fn touch(&mut self) {
         self.last_used = Instant::now();
         self.use_count += 1;
@@ -169,10 +168,11 @@ impl GrpcClientManager {
         }
 
         if let Some(key) = oldest_key
-            && self.clients.remove(&key).is_some() {
-                self.increment_stat("connections_evicted");
-                tracing::debug!(evicted_connection = %key, "Evicted oldest connection");
-            }
+            && self.clients.remove(&key).is_some()
+        {
+            self.increment_stat("connections_evicted");
+            tracing::debug!(evicted_connection = %key, "Evicted oldest connection");
+        }
     }
 
     fn start_cleanup_task(&self) {
@@ -213,4 +213,3 @@ impl GrpcClientManager {
         });
     }
 }
-

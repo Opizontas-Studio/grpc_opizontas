@@ -16,7 +16,6 @@ pub struct ReverseConnection {
 }
 
 impl ReverseConnection {
-
     pub fn update_heartbeat(&mut self) {
         self.last_heartbeat = Instant::now();
     }

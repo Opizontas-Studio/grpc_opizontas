@@ -8,8 +8,8 @@ use tokio_stream::{Stream, StreamExt};
 use tonic::Status;
 use uuid::Uuid;
 
-use crate::registry::{EventMessage, SubscriptionRequest};
 use super::types::{EventConfig, EventError, EventStats, SubscriberInfo};
+use crate::registry::{EventMessage, SubscriptionRequest};
 
 /// 基于 Tokio broadcast 的事件总线
 #[derive(Debug)]
@@ -59,7 +59,7 @@ impl EventBus {
 
         // 获取或创建该事件类型的广播通道
         let sender = self.get_or_create_channel(&event.event_type);
-        
+
         // 发送事件，返回订阅者数量
         match sender.send(event.clone()) {
             Ok(subscriber_count) => {
@@ -130,13 +130,12 @@ impl EventBus {
         );
 
         // 返回转换后的流
-        Ok(BroadcastStream::new(receiver)
-            .map(|result| {
-                result.map_err(|_err| {
-                    // BroadcastStreamRecvError 不提供错误详细信息，使用通用错误
-                    Status::internal("Event stream error")
-                })
-            }))
+        Ok(BroadcastStream::new(receiver).map(|result| {
+            result.map_err(|_err| {
+                // BroadcastStreamRecvError 不提供错误详细信息，使用通用错误
+                Status::internal("Event stream error")
+            })
+        }))
     }
 
     /// 处理订阅请求，返回是否成功
@@ -159,7 +158,8 @@ impl EventBus {
             }
             crate::registry::subscription_request::Action::Unsubscribe => {
                 // 取消订阅
-                self.unsubscribe(&request.subscriber_id, &request.event_types).await;
+                self.unsubscribe(&request.subscriber_id, &request.event_types)
+                    .await;
 
                 tracing::info!(
                     subscriber_id = %request.subscriber_id,
@@ -185,8 +185,10 @@ impl EventBus {
     pub async fn unsubscribe(&self, subscriber_id: &str, event_types: &[String]) {
         // 更新订阅者信息
         if let Some(mut subscriber_info) = self.subscribers.get_mut(subscriber_id) {
-            subscriber_info.event_types.retain(|et| !event_types.contains(et));
-            
+            subscriber_info
+                .event_types
+                .retain(|et| !event_types.contains(et));
+
             if subscriber_info.event_types.is_empty() {
                 drop(subscriber_info);
                 self.subscribers.remove(subscriber_id);
@@ -205,7 +207,7 @@ impl EventBus {
     pub async fn remove_subscriber(&self, subscriber_id: &str) {
         if let Some((_, subscriber_info)) = self.subscribers.remove(subscriber_id) {
             let event_count = subscriber_info.event_types.len();
-            
+
             // 更新统计信息
             if self.config.enable_metrics {
                 if let Ok(mut stats) = self.stats.lock() {
@@ -224,7 +226,7 @@ impl EventBus {
     /// 获取事件统计信息
     pub fn get_stats(&self) -> EventStats {
         let base_stats = self.stats.lock().unwrap().clone();
-        
+
         EventStats {
             active_event_types: self.channels.len(),
             total_subscribers: self.subscribers.len(),
@@ -255,20 +257,20 @@ impl EventBus {
         } else {
             let (sender, _) = broadcast::channel(self.config.channel_capacity);
             self.channels.insert(event_type.to_string(), sender.clone());
-            
+
             // 更新统计信息
             if self.config.enable_metrics {
                 if let Ok(mut stats) = self.stats.lock() {
                     stats.active_event_types = self.channels.len();
                 }
             }
-            
+
             tracing::debug!(
                 event_type = %event_type,
                 capacity = %self.config.channel_capacity,
                 "Created new broadcast channel for event type"
             );
-            
+
             sender
         }
     }
@@ -293,17 +295,17 @@ impl EventBus {
     /// 清理不活跃的通道
     pub async fn cleanup_inactive_channels(&self) {
         let mut to_remove = Vec::new();
-        
+
         for entry in self.channels.iter() {
             let event_type = entry.key();
             let sender = entry.value();
-            
+
             // 如果没有接收者，标记为待删除
             if sender.receiver_count() == 0 {
                 to_remove.push(event_type.clone());
             }
         }
-        
+
         for event_type in to_remove {
             self.channels.remove(&event_type);
             tracing::debug!(
