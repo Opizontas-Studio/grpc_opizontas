@@ -1,102 +1,36 @@
 use dashmap::DashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Instant, SystemTime};
 use tokio::sync::{RwLock, mpsc};
 use tokio_util::task::TaskTracker;
-use uuid::Uuid;
 
-use crate::registry::{ConnectionMessage, ForwardRequest, ForwardResponse};
+use crate::registry::ConnectionMessage;
 use crate::services::event::{EventBus, EventConfig};
 use crate::services::registry::types::{ServiceInstances, ServiceRegistry};
 
 use super::{
     connection::ReverseConnection,
+    service_pool::ServicePool,
     types::{PendingRequest, ReverseConnectionConfig, StreamingResponseHandler},
 };
 
-#[derive(Debug, Clone)]
-struct ServicePool {
-    connections: Arc<DashMap<String, ReverseConnection>>,
-    cursor: Arc<AtomicUsize>,
-}
-
-impl ServicePool {
-    fn new() -> Self {
-        Self {
-            connections: Arc::new(DashMap::new()),
-            cursor: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-
-    fn add_connection(&self, connection: ReverseConnection) -> Option<ReverseConnection> {
-        self.connections
-            .insert(connection.connection_id.clone(), connection)
-    }
-
-    fn remove_connection(&self, connection_id: &str) -> Option<ReverseConnection> {
-        self.connections.remove(connection_id).map(|(_, conn)| conn)
-    }
-
-    fn next_connection(&self, timeout: Duration) -> Option<ReverseConnection> {
-        let mut active = Vec::new();
-        let mut expired_ids = Vec::new();
-
-        for entry in self.connections.iter() {
-            let conn = entry.value().clone();
-            if conn.is_active && !conn.is_expired(timeout) {
-                active.push(conn);
-            } else {
-                expired_ids.push(entry.key().clone());
-            }
-        }
-
-        for id in expired_ids {
-            self.connections.remove(&id);
-        }
-
-        if active.is_empty() {
-            return None;
-        }
-
-        let idx = self.cursor.fetch_add(1, Ordering::Relaxed);
-        Some(active[idx % active.len()].clone())
-    }
-
-    fn is_empty(&self) -> bool {
-        self.connections.is_empty()
-    }
-
-    fn len(&self) -> usize {
-        self.connections.len()
-    }
-
-    fn update_connection<F>(&self, connection_id: &str, mut update_fn: F)
-    where
-        F: FnMut(&mut ReverseConnection),
-    {
-        if let Some(mut entry) = self.connections.get_mut(connection_id) {
-            update_fn(entry.value_mut());
-        }
-    }
-}
 // 反向连接管理器
 #[derive(Debug, Clone)]
 pub struct ReverseConnectionManager {
     // 服务名 -> 反向连接映射
-    connections_by_service: Arc<DashMap<String, ServicePool>>,
+    pub(crate) connections_by_service: Arc<DashMap<String, ServicePool>>,
     // 连接ID -> 反向连接映射
-    connections_by_id: Arc<DashMap<String, ReverseConnection>>,
+    pub(crate) connections_by_id: Arc<DashMap<String, ReverseConnection>>,
     // 等待响应的请求
-    pending_requests: Arc<RwLock<DashMap<String, PendingRequest>>>,
+    pub(crate) pending_requests: Arc<RwLock<DashMap<String, PendingRequest>>>,
     // 流式响应处理器
-    streaming_handlers: Arc<RwLock<DashMap<String, StreamingResponseHandler>>>,
+    pub(crate) streaming_handlers: Arc<RwLock<DashMap<String, StreamingResponseHandler>>>,
     // 主服务注册表的引用，用于同步清理
-    service_registry: Option<ServiceRegistry>,
+    pub(crate) service_registry: Option<ServiceRegistry>,
     // 事件总线
     pub event_bus: Arc<EventBus>,
-    config: ReverseConnectionConfig,
-    task_tracker: Arc<TaskTracker>,
+    pub(crate) config: ReverseConnectionConfig,
+    pub(crate) task_tracker: Arc<TaskTracker>,
 }
 
 impl Default for ReverseConnectionManager {
@@ -449,6 +383,70 @@ impl ReverseConnectionManager {
         result
     }
 
+    // 检查是否存在可用的反向连接
+    pub fn has_reverse_connection(&self, service_name: &str) -> bool {
+        if self.has_direct_reverse_connection(service_name) {
+            return true;
+        }
+
+        if service_name.contains('.') {
+            return self.has_hierarchical_reverse_connection(service_name);
+        }
+
+        false
+    }
+
+    fn has_direct_reverse_connection(&self, service_name: &str) -> bool {
+        if let Some(pool_ref) = self.connections_by_service.get(service_name) {
+            let pool = pool_ref.clone();
+            drop(pool_ref);
+
+            if pool
+                .next_connection(self.config.heartbeat_timeout)
+                .is_some()
+            {
+                return true;
+            }
+
+            self.connections_by_service
+                .remove_if(service_name, |_, p| p.is_empty());
+        }
+
+        false
+    }
+
+    fn has_hierarchical_reverse_connection(&self, service_name: &str) -> bool {
+        let parts: Vec<&str> = service_name.split('.').collect();
+        if parts.len() < 2 {
+            return false;
+        }
+
+        for i in (1..parts.len()).rev() {
+            let parent_name = parts[..i].join(".");
+            if let Some(pool_ref) = self.connections_by_service.get(&parent_name) {
+                let pool = pool_ref.clone();
+                drop(pool_ref);
+
+                if pool
+                    .next_connection(self.config.heartbeat_timeout)
+                    .is_some()
+                {
+                    tracing::debug!(
+                        requested_service = %service_name,
+                        matched_service = %parent_name,
+                        "Found reverse connection during availability check via hierarchical lookup"
+                    );
+                    return true;
+                }
+
+                self.connections_by_service
+                    .remove_if(&parent_name, |_, p| p.is_empty());
+            }
+        }
+
+        false
+    }
+
     // 清理孤立的服务注册表条目（没有对应反向连接的服务）
     fn cleanup_orphaned_service_registry_entry(&self, service_name: &str) {
         if let Some(ref service_registry) = self.service_registry {
@@ -509,529 +507,7 @@ impl ReverseConnectionManager {
         None
     }
 
-    // 发送请求到微服务并等待响应
-    pub async fn send_request(
-        &self,
-        service_name: &str,
-        method_path: &str,
-        headers: std::collections::HashMap<String, String>,
-        payload: Vec<u8>,
-    ) -> Result<ForwardResponse, String> {
-        // 生成新的请求ID
-        let request_id = Uuid::new_v4().to_string();
-        self.send_request_with_id(&request_id, service_name, method_path, headers, payload)
-            .await
-    }
 
-    // 流式发送请求到微服务并等待响应
-    pub async fn send_request_stream<B>(
-        &self,
-        service_name: &str,
-        method_path: &str,
-        headers: std::collections::HashMap<String, String>,
-        body: B,
-    ) -> Result<ForwardResponse, String>
-    where
-        B: http_body::Body<Data = bytes::Bytes> + Send + 'static,
-        B::Error: Into<Box<dyn std::error::Error + Send + Sync>> + std::fmt::Debug,
-    {
-        use http_body_util::BodyExt;
-
-        // 对于现有的API兼容性，仍然需要收集body
-        // 但这里可以添加大小限制来避免无限内存使用
-        let collected = body
-            .collect()
-            .await
-            .map_err(|e| format!("Failed to collect request body: {e:?}"))?;
-        let payload = collected.to_bytes().to_vec();
-
-        // 如果payload太大，可以在这里添加大小检查
-        const MAX_BODY_SIZE: usize = 100 * 1024 * 1024; // 100MB
-        if payload.len() > MAX_BODY_SIZE {
-            return Err(format!(
-                "Request body too large: {} bytes (max: {} bytes)",
-                payload.len(),
-                MAX_BODY_SIZE
-            ));
-        }
-
-        self.send_request(service_name, method_path, headers, payload)
-            .await
-    }
-
-    // 使用指定的请求ID发送请求到微服务并等待响应
-    pub async fn send_request_with_id(
-        &self,
-        request_id: &str,
-        service_name: &str,
-        method_path: &str,
-        headers: std::collections::HashMap<String, String>,
-        payload: Vec<u8>,
-    ) -> Result<ForwardResponse, String> {
-        // 获取连接
-        let connection = self
-            .get_connection_for_service(service_name)
-            .ok_or_else(|| {
-                tracing::error!(
-                    service_name = %service_name,
-                    method_path = %method_path,
-                    request_id = %request_id,
-                    "No reverse connection found for service"
-                );
-                format!("No reverse connection found for service: {service_name}")
-            })?;
-
-        // 使用传入的请求ID
-        let request_id = request_id.to_string();
-        let payload_size = payload.len();
-
-        // 创建响应通道
-        let (response_sender, response_receiver) = tokio::sync::oneshot::channel();
-
-        // 存储等待中的请求
-        {
-            let pending_requests = self.pending_requests.read().await;
-            if pending_requests.len() >= self.config.max_pending_requests {
-                return Err("Too many pending requests".to_string());
-            }
-            pending_requests.insert(
-                request_id.clone(),
-                PendingRequest {
-                    request_id: request_id.clone(),
-                    created_at: Instant::now(),
-                    response_sender,
-                },
-            );
-        }
-
-        // 构建转发请求
-        let forward_request = ForwardRequest {
-            request_id: request_id.clone(),
-            method_path: method_path.to_string(),
-            headers,
-            payload,
-            timeout_seconds: self.config.request_timeout.as_secs() as i32,
-            streaming_info: Some(crate::registry::StreamingInfo {
-                stream_type: crate::registry::streaming_info::StreamType::Unary as i32,
-                is_stream_end: true,
-                sequence_number: 0,
-                chunk_size: 0,
-            }),
-        };
-
-        let message = ConnectionMessage {
-            message_type: Some(crate::registry::connection_message::MessageType::Request(
-                forward_request,
-            )),
-        };
-
-        tracing::debug!(
-            service_name = %service_name,
-            method_path = %method_path,
-            request_id = %request_id,
-            connection_id = %connection.connection_id,
-            payload_size = payload_size,
-            "Sending request via reverse connection"
-        );
-
-        // 发送请求到微服务
-        if connection.request_sender.send(message).is_err() {
-            // 移除等待中的请求
-            let pending_requests = self.pending_requests.read().await;
-            pending_requests.remove(&request_id);
-
-            tracing::error!(
-                service_name = %service_name,
-                method_path = %method_path,
-                request_id = %request_id,
-                connection_id = %connection.connection_id,
-                "Failed to send request to microservice - connection channel closed"
-            );
-
-            return Err("Failed to send request to microservice".to_string());
-        }
-
-        // 等待响应（带超时）
-        match tokio::time::timeout(self.config.request_timeout, response_receiver).await {
-            Ok(Ok(response)) => {
-                tracing::debug!(
-                    service_name = %service_name,
-                    method_path = %method_path,
-                    request_id = %request_id,
-                    status_code = response.status_code,
-                    response_size = response.payload.len(),
-                    "Received response via reverse connection"
-                );
-                Ok(response)
-            }
-            Ok(Err(_)) => {
-                // 移除等待中的请求
-                let pending_requests = self.pending_requests.read().await;
-                pending_requests.remove(&request_id);
-
-                tracing::error!(
-                    service_name = %service_name,
-                    method_path = %method_path,
-                    request_id = %request_id,
-                    "Response channel closed - microservice disconnected unexpectedly"
-                );
-
-                Err("Response channel closed".to_string())
-            }
-            Err(_) => {
-                // 移除等待中的请求
-                let pending_requests = self.pending_requests.read().await;
-                pending_requests.remove(&request_id);
-
-                tracing::error!(
-                    service_name = %service_name,
-                    method_path = %method_path,
-                    request_id = %request_id,
-                    timeout_ms = self.config.request_timeout.as_millis(),
-                    "Request timeout - microservice did not respond in time"
-                );
-
-                Err("Request timeout".to_string())
-            }
-        }
-    }
-
-    // 处理来自微服务的响应
-    pub async fn handle_response(&self, response: ForwardResponse) {
-        // 检查是否为流式响应
-        if Self::is_streaming_response(&response) {
-            self.handle_streaming_response(response).await;
-        } else {
-            // 处理常规响应
-            let pending_requests = self.pending_requests.read().await;
-            if let Some((_id, pending)) = pending_requests.remove(&response.request_id) {
-                if pending.response_sender.send(response).is_err() {
-                    tracing::warn!(request_id = %pending.request_id, "Failed to send response to waiting client");
-                }
-            } else {
-                tracing::warn!(request_id = %response.request_id, "Received response for unknown request");
-            }
-        }
-    }
-
-    // 处理流式响应
-    async fn handle_streaming_response(&self, response: ForwardResponse) {
-        let stream_info = match response.response_stream_info.as_ref() {
-            Some(info) => info,
-            None => {
-                tracing::error!(request_id = %response.request_id, "Missing stream info in streaming response");
-                return;
-            }
-        };
-
-        let streaming_handlers = self.streaming_handlers.write().await;
-
-        // 检查是否已有处理器
-        if !streaming_handlers.contains_key(&response.request_id) {
-            // 这是一个新的流式响应，需要从 pending_requests 中获取 sender
-            let pending_requests = self.pending_requests.read().await;
-            if let Some((_id, pending)) = pending_requests.remove(&response.request_id) {
-                let handler = StreamingResponseHandler {
-                    request_id: response.request_id.clone(),
-                    chunks: std::collections::BTreeMap::new(),
-                    next_expected_chunk: 0,
-                    is_complete: false,
-                    total_size: stream_info.total_size,
-                    response_sender: pending.response_sender,
-                };
-                streaming_handlers.insert(response.request_id.clone(), handler);
-            } else {
-                tracing::warn!(request_id = %response.request_id, "No pending request found for streaming response");
-                return;
-            }
-        }
-
-        let mut handler = match streaming_handlers.get_mut(&response.request_id) {
-            Some(h) => h,
-            None => return,
-        };
-
-        // 添加数据块
-        handler
-            .chunks
-            .insert(stream_info.chunk_index, response.payload.clone());
-
-        // 检查是否可以组装完整响应
-        if stream_info.is_final_chunk {
-            handler.is_complete = true;
-        }
-
-        // 尝试组装完整的响应
-        if handler.is_complete {
-            let mut complete_payload = Vec::new();
-            for chunk_index in 0..=stream_info.chunk_index {
-                if let Some(chunk_data) = handler.chunks.remove(&chunk_index) {
-                    complete_payload.extend(chunk_data);
-                } else {
-                    tracing::error!(request_id = %response.request_id, chunk_index, "Missing chunk in streaming response");
-                    return;
-                }
-            }
-
-            // 创建完整的响应
-            let complete_response = ForwardResponse {
-                request_id: response.request_id.clone(),
-                status_code: response.status_code,
-                headers: response.headers,
-                payload: complete_payload,
-                error_message: response.error_message,
-                streaming_info: response.streaming_info,
-                response_stream_info: None, // 清除流式信息，因为这是最终的完整响应
-            };
-
-            // 发送完整响应
-            if let Some((_id, handler)) = streaming_handlers.remove(&response.request_id) {
-                if handler.response_sender.send(complete_response).is_err() {
-                    tracing::warn!(request_id = %response.request_id, "Failed to send complete streaming response to waiting client");
-                }
-            }
-        }
-    }
-
-    // 创建流式响应块
-    pub fn create_response_chunk(
-        request_id: String,
-        chunk_data: Vec<u8>,
-        chunk_index: i64,
-        is_final: bool,
-        total_size: Option<i64>,
-    ) -> ForwardResponse {
-        let chunk_size = chunk_data.len() as i32;
-        ForwardResponse {
-            request_id,
-            status_code: 200,
-            payload: chunk_data,
-            response_stream_info: Some(crate::registry::ResponseStreamInfo {
-                is_streamed: true,
-                chunk_index,
-                is_final_chunk: is_final,
-                chunk_size,
-                total_size,
-            }),
-            ..Default::default()
-        }
-    }
-
-    // 检查响应是否为流式响应
-    pub fn is_streaming_response(response: &ForwardResponse) -> bool {
-        response
-            .response_stream_info
-            .as_ref()
-            .map(|info| info.is_streamed)
-            .unwrap_or(false)
-    }
-
-    // 检查服务是否支持反向连接
-    pub fn has_reverse_connection(&self, service_name: &str) -> bool {
-        self.connections_by_service
-            .get(service_name)
-            .map(|pool| !pool.is_empty())
-            .unwrap_or(false)
-    }
-
-    // 获取连接统计信息
-    pub fn get_stats(&self) -> super::types::ConnectionStats {
-        super::types::ConnectionStats {
-            active_connections: self.connections_by_id.len(),
-            registered_services: self.connections_by_service.len(),
-        }
-    }
-
-    // 处理事件消息
-    pub async fn handle_event_message(
-        &self,
-        event: crate::registry::EventMessage,
-    ) -> Result<usize, String> {
-        match self.event_bus.publish_event(event).await {
-            Ok(subscriber_count) => Ok(subscriber_count),
-            Err(err) => {
-                tracing::warn!(error = %err, "Failed to publish event");
-                Err(format!("Failed to publish event: {}", err))
-            }
-        }
-    }
-
-    // 处理订阅请求
-    pub async fn handle_subscription_request(
-        &self,
-        subscription: crate::registry::SubscriptionRequest,
-    ) -> Result<(), String> {
-        match self
-            .event_bus
-            .handle_subscription_request(subscription)
-            .await
-        {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                tracing::warn!(error = %err, "Failed to handle subscription request");
-                Err(format!("Failed to handle subscription: {}", err))
-            }
-        }
-    }
-
-    // 为连接创建事件流
-    pub fn create_event_stream_for_connection(
-        &self,
-        connection_id: &str,
-        event_type: &str,
-    ) -> Result<
-        impl tokio_stream::Stream<Item = Result<crate::registry::EventMessage, tonic::Status>>,
-        String,
-    > {
-        match self
-            .event_bus
-            .subscribe_event_type(event_type, connection_id)
-        {
-            Ok(stream) => Ok(stream),
-            Err(err) => {
-                tracing::warn!(
-                    connection_id = %connection_id,
-                    event_type = %event_type,
-                    error = %err,
-                    "Failed to create event stream"
-                );
-                Err(format!("Failed to create event stream: {}", err))
-            }
-        }
-    }
-
-    // 清理连接的所有订阅
-    pub async fn cleanup_connection_subscriptions(&self, connection_id: &str) {
-        self.event_bus.remove_subscriber(connection_id).await;
-        tracing::debug!(
-            connection_id = %connection_id,
-            "Cleaned up event subscriptions for connection"
-        );
-    }
-
-    // 启动清理任务
-    fn start_cleanup_task(&self) {
-        let connections_by_service = self.connections_by_service.clone();
-        let connections_by_id = self.connections_by_id.clone();
-        let pending_requests = self.pending_requests.clone();
-        let heartbeat_timeout = self.config.heartbeat_timeout;
-        let request_timeout = self.config.request_timeout;
-        let cleanup_interval = self.config.cleanup_interval;
-        let service_registry = self.service_registry.clone();
-
-        self.task_tracker.spawn(async move {
-            let mut interval = tokio::time::interval(cleanup_interval);
-            loop {
-                interval.tick().await;
-                Self::cleanup_expired_connections(
-                    &connections_by_service,
-                    &connections_by_id,
-                    service_registry.clone(),
-                    heartbeat_timeout,
-                );
-                Self::cleanup_expired_requests(&pending_requests, request_timeout).await;
-            }
-        });
-    }
-
-    // 清理过期连接
-    fn cleanup_expired_connections(
-        connections_by_service: &Arc<DashMap<String, ServicePool>>,
-        connections_by_id: &Arc<DashMap<String, ReverseConnection>>,
-        service_registry: Option<ServiceRegistry>,
-        timeout: Duration,
-    ) {
-        let mut expired_connections = Vec::new();
-
-        for entry in connections_by_id.iter() {
-            let connection = entry.value();
-
-            if connection.is_expired(timeout) {
-                expired_connections.push(connection.clone());
-            }
-        }
-
-        for connection in expired_connections {
-            let connection_id = connection.connection_id.clone();
-            let services = connection.services.clone();
-
-            tracing::warn!(
-                connection_id = %connection_id,
-                services_count = services.len(),
-                "Removing expired reverse connection"
-            );
-
-            connections_by_id.remove(&connection_id);
-            for service in &services {
-                if let Some(pool_entry) = connections_by_service.get(service) {
-                    let pool = pool_entry.clone();
-                    drop(pool_entry);
-
-                    if pool.remove_connection(&connection_id).is_some() {
-                        tracing::debug!(
-                            service_name = %service,
-                            connection_id = %connection_id,
-                            "Removed expired reverse connection instance from service pool"
-                        );
-                    }
-
-                    if pool.is_empty() {
-                        connections_by_service.remove_if(service, |_, p| p.is_empty());
-                        tracing::debug!(
-                            service_name = %service,
-                            "Service pool empty after removing expired connections, removed mapping"
-                        );
-                    }
-                }
-
-                if let Some(ref registry) = service_registry {
-                    if let Some(instances_guard) = registry.get(service) {
-                        let instances = instances_guard.clone();
-                        drop(instances_guard);
-
-                        if instances.remove(&connection_id).is_some() {
-                            tracing::debug!(
-                                service_name = %service,
-                                connection_id = %connection_id,
-                                "Removed expired service instance from registry"
-                            );
-                        }
-
-                        if instances.is_empty() {
-                            registry.remove_if(service, |_, v: &ServiceInstances| v.is_empty());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 清理过期请求
-    async fn cleanup_expired_requests(
-        pending_requests: &Arc<RwLock<DashMap<String, PendingRequest>>>,
-        timeout: Duration,
-    ) {
-        let pending_requests_guard = pending_requests.read().await;
-        let now = Instant::now();
-        let mut expired_requests = Vec::new();
-
-        // 收集过期请求
-        for entry in pending_requests_guard.iter() {
-            let request_id = entry.key();
-            let request = entry.value();
-
-            if now.duration_since(request.created_at) > timeout {
-                expired_requests.push(request_id.clone());
-            }
-        }
-
-        // 移除过期请求
-        for request_id in expired_requests {
-            if let Some((_id, _request)) = pending_requests_guard.remove(&request_id) {
-                tracing::warn!(request_id = %request_id, "Removing expired pending request");
-            }
-        }
-    }
 }
 
 impl Drop for ReverseConnectionManager {

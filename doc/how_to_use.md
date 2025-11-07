@@ -1,8 +1,4 @@
-好的，现在我已经了解了整个系统的架构和实现细节。让我完成 `how_to_use.md` 文档：
-
-<write_file>
-<path>doc/how_to_use.md</path>
-<content># 如何连接到 Grpc 网关
+# 如何连接到 Grpc 网关
 
 本文档将指导您如何作为 **服务提供端** 将您的服务接入网关。项目在设计之初就是为了帮助微服务跨网络数据调度。
 
@@ -64,10 +60,10 @@ message ConnectionRegister {
 
 与传统的客户端-服务器模型不同，本网关采用 **反向连接** 模型。这意味着：
 
-1. **您的微服务作为客户端**，主动连接到网关
-2. **建立长期的双向 gRPC 流**，用于所有后续通信
-3. **网关通过这个流推送请求**给您的服务
-4. **您的服务通过同一个流返回响应**
+- **您的微服务作为客户端**，主动连接到网关
+- **建立长期的双向 gRPC 流**，用于所有后续通信
+- **网关通过这个流推送请求**给您的服务
+- **您的服务通过同一个流返回响应**
 
 ### 为什么使用反向连接？
 
@@ -101,7 +97,7 @@ ConnectionMessage {
 }
 ```
 
-**重要字段说明：**
+其中，我们需要注意这些重要字段：
 
 - `api_key`: 您的身份验证密钥（从网关管理员获取）
 - `services`: 您要注册的 gRPC 服务完整名称列表（格式：`package.ServiceName`）
@@ -121,9 +117,7 @@ ConnectionMessage {
 }
 ```
 
-**⚠️ 关键：保存这个 `connection_id`！**
-
-这个 ID 是您后续所有通信的唯一标识符，特别是发送心跳时必须使用。
+请注意：！！！！！！**⚠️ 关键：保存这个 `connection_id`！**这个 ID 是您后续所有通信的唯一标识符，特别是发送心跳时必须使用。
 
 ### 第四步：启动心跳机制
 
@@ -138,7 +132,8 @@ ConnectionMessage {
 }
 ```
 
-**⚠️ 常见错误：**
+这里有一些常见错误：
+
 - ❌ 使用服务名称作为 connection_id
 - ❌ 使用自己生成的 ID
 - ✅ 必须使用网关返回的 connection_id
@@ -159,7 +154,8 @@ ConnectionMessage {
 }
 ```
 
-**字段说明：**
+然后需要注意：
+
 - `request_id`: 请求的唯一标识符，响应时必须原样返回
 - `method_path`: gRPC 方法的完整路径
 - `payload`: 原始请求的 protobuf 编码字节
@@ -182,26 +178,31 @@ ConnectionMessage {
 
 ## 完整的消息流程图
 
-```
-微服务                                    网关                                外部客户端
-  |                                        |                                      |
-  |--[1. EstablishConnection]------------->|                                      |
-  |<---------[双向流建立]-------------------|                                      |
-  |                                        |                                      |
-  |--[2. ConnectionRegister]-------------->|                                      |
-  |<-[3. ConnectionStatus + ID]------------|                                      |
-  |                                        |                                      |
-  |--[4. Heartbeat (每30秒)]-------------->|                                      |
-  |--[4. Heartbeat]----------------------->|                                      |
-  |                                        |                                      |
-  |                                        |<--[5. gRPC 调用]---------------------|
-  |<-[6. ForwardRequest]-------------------|                                      |
-  |                                        |                                      |
-  |--[处理请求...]                          |                                      |
-  |                                        |                                      |
-  |--[7. ForwardResponse]----------------->|                                      |
-  |                                        |---[8. gRPC 响应]-------------------->|
-  |                                        |                                      |
+```mermaid
+graph TD
+    subgraph 外部客户端
+        Client[外部客户端]
+    end
+
+    subgraph 网关
+        Gateway[网关]
+    end
+
+    subgraph 微服务
+        Microservice[微服务]
+    end
+
+    Microservice -- "1. EstablishConnection" --> Gateway;
+    Gateway -- "双向流建立" --> Microservice;
+    Microservice -- "2. ConnectionRegister" --> Gateway;
+    Gateway -- "3. ConnectionStatus + ID" --> Microservice;
+    Microservice -- "4. Heartbeat (每30秒)" --> Gateway;
+    
+    Client -- "5. gRPC 调用" --> Gateway;
+    Gateway -- "6. ForwardRequest" --> Microservice;
+    Microservice -- "处理请求..." --> Microservice;
+    Microservice -- "7. ForwardResponse" --> Gateway;
+    Gateway -- "8. gRPC 响应" --> Client;
 ```
 
 
@@ -255,4 +256,4 @@ ConnectionMessage {
 }
 ```
 
-
+就是这样，我摸鱼去了
