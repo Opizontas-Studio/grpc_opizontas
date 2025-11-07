@@ -51,7 +51,7 @@ message ConnectionRegister {
   string api_key = 1;
   // 微服务提供的 gRPC 服务名称列表
   repeated string services = 2;
-  // 可选的连接标识符
+  // 连接标识符
   string connection_id = 3;
 }
 
